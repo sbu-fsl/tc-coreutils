@@ -109,6 +109,7 @@
 #include "areadlink.h"
 #include "mbsalign.h"
 #include "dircolors.h"
+#include "tc_impl_posix.h"
 
 /* Include <sys/capability.h> last to avoid a clash of <sys/types.h>
    include guards with some premature versions of libcap.
@@ -141,16 +142,6 @@
    encapsulates whether we can use the more efficient approach of relying
    on readdir-supplied d_ino values, or whether we must incur the cost of
    calling stat or lstat to obtain each guaranteed-valid inode number.  */
-
-#ifndef READDIR_LIES_ABOUT_MOUNTPOINT_D_INO
-# define READDIR_LIES_ABOUT_MOUNTPOINT_D_INO 1
-#endif
-
-#if READDIR_LIES_ABOUT_MOUNTPOINT_D_INO
-# define RELIABLE_D_INO(dp) NOT_AN_INODE_NUMBER
-#else
-# define RELIABLE_D_INO(dp) D_INO (dp)
-#endif
 
 #if ! HAVE_STRUCT_STAT_ST_AUTHOR
 # define st_author st_uid
@@ -245,7 +236,6 @@ static size_t quote_name (FILE *out, const char *name,
                           size_t *width);
 static char *make_link_name (char const *name, char const *linkname);
 static int decode_switches (int argc, char **argv);
-static bool file_ignored (char const *name);
 static uintmax_t gobble_file (char const *name, enum filetype type,
                               ino_t inode, bool command_line_arg,
                               char const *dirname);
@@ -262,8 +252,6 @@ static void get_link_name (char const *filename, struct fileinfo *f,
 static void indent (size_t from, size_t to);
 static size_t calculate_columns (bool by_columns);
 static void print_current_files (void);
-static void print_dir (char const *name, char const *realname,
-                       bool command_line_arg);
 static size_t print_file_name_and_frills (const struct fileinfo *f,
                                           size_t start_col);
 static void print_horizontal (void);
@@ -970,7 +958,7 @@ static struct obstack subdired_obstack;
 static struct obstack dev_ino_obstack;
 
 /* Push a pair onto the device/inode stack.  */
-static void
+/*static void
 dev_ino_push (dev_t dev, ino_t ino)
 {
   void *vdi;
@@ -983,6 +971,7 @@ dev_ino_push (dev_t dev, ino_t ino)
   di->st_dev = dev;
   di->st_ino = ino;
 }
+*/
 
 /* Pop a dev/ino struct off the global dev_ino_obstack
    and return that struct.  */
@@ -1109,36 +1098,7 @@ dev_ino_free (void *x)
    active directories.  Return true if there is already a matching
    entry in the table.  */
 
-static bool
-visit_dir (dev_t dev, ino_t ino)
-{
-  struct dev_ino *ent;
-  struct dev_ino *ent_from_table;
-  bool found_match;
-
-  ent = xmalloc (sizeof *ent);
-  ent->st_ino = ino;
-  ent->st_dev = dev;
-
-  /* Attempt to insert this entry into the table.  */
-  ent_from_table = hash_insert (active_dir_set, ent);
-
-  if (ent_from_table == NULL)
-    {
-      /* Insertion failed due to lack of memory.  */
-      xalloc_die ();
-    }
-
-  found_match = (ent_from_table != ent);
-
-  if (found_match)
-    {
-      /* ent was not inserted, so free it.  */
-      free (ent);
-    }
-
-  return found_match;
-}
+//static bool visit_dir (dev_t dev, ino_t ino)
 
 static void
 free_pending_ent (struct pending *p)
@@ -1242,6 +1202,42 @@ process_signals (void)
       /* If execution reaches here, then the program has been
          continued (after being suspended).  */
     }
+}
+
+static void tc_print_dir(char const *name, char const *realname, bool command_line_arg)
+{
+	struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
+	struct tc_attrs_masks masks = { 0 };
+	struct tc_attrs *cur_dirp = NULL;
+	int i=0, count = 0;
+
+	masks.has_mode = 1;
+	masks.has_size = 1;
+	masks.has_atime = 1;
+	masks.has_mtime = 1;
+	masks.has_uid = 1;
+	masks.has_gid = 1;
+	masks.has_rdev = 1;
+	masks.has_nlink = 1;
+	masks.has_ctime = 1;
+
+	contents->masks = masks;
+
+	tc_res res = posix_listdir(name, masks, 4096, &contents, &count);
+
+	if(res.okay == 0)
+	return;
+
+	while(i < count) {
+		cur_dirp = (contents + i);
+		char *last = strrchr(cur_dirp->file.path, '/');
+		if (last != NULL)
+			printf("%s ", last+1);
+
+		i++;
+	}
+
+	free(contents);
 }
 
 int
@@ -1459,7 +1455,7 @@ main (int argc, char **argv)
             }
         }
 
-      print_dir (thispend->name, thispend->realname,
+      tc_print_dir (thispend->name, thispend->realname,
                  thispend->command_line_arg);
 
       free_pending_ent (thispend);
@@ -2564,165 +2560,7 @@ queue_directory (char const *name, char const *realname, bool command_line_arg)
    this is used for symbolic links to directories.
    COMMAND_LINE_ARG means this directory was mentioned on the command line.  */
 
-static void
-print_dir (char const *name, char const *realname, bool command_line_arg)
-{
-  DIR *dirp;
-  struct dirent *next;
-  uintmax_t total_blocks = 0;
-  static bool first = true;
-
-  errno = 0;
-  dirp = opendir (name);
-  if (!dirp)
-    {
-      file_failure (command_line_arg, _("cannot open directory %s"), name);
-      return;
-    }
-
-  if (LOOP_DETECT)
-    {
-      struct stat dir_stat;
-      int fd = dirfd (dirp);
-
-      /* If dirfd failed, endure the overhead of using stat.  */
-      if ((0 <= fd
-           ? fstat (fd, &dir_stat)
-           : stat (name, &dir_stat)) < 0)
-        {
-          file_failure (command_line_arg,
-                        _("cannot determine device and inode of %s"), name);
-          closedir (dirp);
-          return;
-        }
-
-      /* If we've already visited this dev/inode pair, warn that
-         we've found a loop, and do not process this directory.  */
-      if (visit_dir (dir_stat.st_dev, dir_stat.st_ino))
-        {
-          error (0, 0, _("%s: not listing already-listed directory"),
-                 quotef (name));
-          closedir (dirp);
-          set_exit_status (true);
-          return;
-        }
-
-      dev_ino_push (dir_stat.st_dev, dir_stat.st_ino);
-    }
-
-  if (recursive || print_dir_name)
-    {
-      if (!first)
-        DIRED_PUTCHAR ('\n');
-      first = false;
-      DIRED_INDENT ();
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      dired_pos += quote_name (stdout, realname ? realname : name,
-                               dirname_quoting_options, NULL);
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      DIRED_FPUTS_LITERAL (":\n", stdout);
-    }
-
-  /* Read the directory entries, and insert the subfiles into the 'cwd_file'
-     table.  */
-
-  clear_files ();
-
-  while (1)
-    {
-      /* Set errno to zero so we can distinguish between a readdir failure
-         and when readdir simply finds that there are no more entries.  */
-      errno = 0;
-      next = readdir (dirp);
-      if (next)
-        {
-          if (! file_ignored (next->d_name))
-            {
-              enum filetype type = unknown;
-
-#if HAVE_STRUCT_DIRENT_D_TYPE
-              switch (next->d_type)
-                {
-                case DT_BLK:  type = blockdev;		break;
-                case DT_CHR:  type = chardev;		break;
-                case DT_DIR:  type = directory;		break;
-                case DT_FIFO: type = fifo;		break;
-                case DT_LNK:  type = symbolic_link;	break;
-                case DT_REG:  type = normal;		break;
-                case DT_SOCK: type = sock;		break;
-# ifdef DT_WHT
-                case DT_WHT:  type = whiteout;		break;
-# endif
-                }
-#endif
-              total_blocks += gobble_file (next->d_name, type,
-                                           RELIABLE_D_INO (next),
-                                           false, name);
-
-              /* In this narrow case, print out each name right away, so
-                 ls uses constant memory while processing the entries of
-                 this directory.  Useful when there are many (millions)
-                 of entries in a directory.  */
-              if (format == one_per_line && sort_type == sort_none
-                      && !print_block_size && !recursive)
-                {
-                  /* We must call sort_files in spite of
-                     "sort_type == sort_none" for its initialization
-                     of the sorted_file vector.  */
-                  sort_files ();
-                  print_current_files ();
-                  clear_files ();
-                }
-            }
-        }
-      else if (errno != 0)
-        {
-          file_failure (command_line_arg, _("reading directory %s"), name);
-          if (errno != EOVERFLOW)
-            break;
-        }
-      else
-        break;
-
-      /* When processing a very large directory, and since we've inhibited
-         interrupts, this loop would take so long that ls would be annoyingly
-         uninterruptible.  This ensures that it handles signals promptly.  */
-      process_signals ();
-    }
-
-  if (closedir (dirp) != 0)
-    {
-      file_failure (command_line_arg, _("closing directory %s"), name);
-      /* Don't return; print whatever we got.  */
-    }
-
-  /* Sort the directory contents.  */
-  sort_files ();
-
-  /* If any member files are subdirectories, perhaps they should have their
-     contents listed rather than being mentioned here as files.  */
-
-  if (recursive)
-    extract_dirs_from_files (name, false);
-
-  if (format == long_format || print_block_size)
-    {
-      const char *p;
-      char buf[LONGEST_HUMAN_READABLE + 1];
-
-      DIRED_INDENT ();
-      p = _("total");
-      DIRED_FPUTS (p, stdout, strlen (p));
-      DIRED_PUTCHAR (' ');
-      p = human_readable (total_blocks, buf, human_output_opts,
-                          ST_NBLOCKSIZE, output_block_size);
-      DIRED_FPUTS (p, stdout, strlen (p));
-      DIRED_PUTCHAR ('\n');
-    }
-
-  if (cwd_n_used)
-    print_current_files ();
-}
+//print_dir
 
 /* Add 'pattern' to the list of patterns for which files that match are
    not listed.  */
@@ -2741,7 +2579,7 @@ add_ignore_pattern (const char *pattern)
 
 /* Return true if one of the PATTERNS matches FILE.  */
 
-static bool
+/*static bool
 patterns_match (struct ignore_pattern const *patterns, char const *file)
 {
   struct ignore_pattern const *p;
@@ -2750,11 +2588,11 @@ patterns_match (struct ignore_pattern const *patterns, char const *file)
       return true;
   return false;
 }
+*/
 
 /* Return true if FILE should be ignored.  */
 
-static bool
-file_ignored (char const *name)
+/*static bool file_ignored (char const *name)
 {
   return ((ignore_mode != IGNORE_MINIMAL
            && name[0] == '.'
@@ -2763,6 +2601,7 @@ file_ignored (char const *name)
               && patterns_match (hide_patterns, name))
           || patterns_match (ignore_patterns, name));
 }
+*/
 
 /* POSIX requires that a file size be printed without a sign, even
    when negative.  Assume the typical case where negative sizes are
@@ -3720,20 +3559,20 @@ long_time_expected_width (void)
   if (width < 0)
     {
       time_t epoch = 0;
-      struct tm tm;
+      struct tm const *tm = localtime (&epoch);
       char buf[TIME_STAMP_LEN_MAXIMUM + 1];
 
-      /* In case you're wondering if localtime_rz can fail with an input time_t
+      /* In case you're wondering if localtime can fail with an input time_t
          value of 0, let's just say it's very unlikely, but not inconceivable.
          The TZ environment variable would have to specify a time zone that
          is 2**31-1900 years or more ahead of UTC.  This could happen only on
          a 64-bit system that blindly accepts e.g., TZ=UTC+20000000000000.
          However, this is not possible with Solaris 10 or glibc-2.3.5, since
          their implementations limit the offset to 167:59 and 24:00, resp.  */
-      if (localtime_rz (localtz, &epoch, &tm))
+      if (tm)
         {
           size_t len =
-            align_nstrftime (buf, sizeof buf, long_time_format[0], &tm,
+            align_nstrftime (buf, sizeof buf, long_time_format[0], tm,
                              localtz, 0);
           if (len != 0)
             width = mbsnwidth (buf, len, 0);
@@ -3856,7 +3695,7 @@ print_long_format (const struct fileinfo *f)
   size_t s;
   char *p;
   struct timespec when_timespec;
-  struct tm when_local;
+  struct tm *when_local;
 
   /* Compute the mode string, except remove the trailing space if no
      file in this directory has an ACL or security context.  */
@@ -3983,10 +3822,11 @@ print_long_format (const struct fileinfo *f)
       p[-1] = ' ';
     }
 
+  when_local = localtime (&when_timespec.tv_sec);
   s = 0;
   *p = '\1';
 
-  if (f->stat_ok && localtime_rz (localtz, &when_timespec.tv_sec, &when_local))
+  if (f->stat_ok && when_local)
     {
       struct timespec six_months_ago;
       bool recent;
@@ -3996,7 +3836,13 @@ print_long_format (const struct fileinfo *f)
          time, in case the file happens to have been modified since
          the last time we checked the clock.  */
       if (timespec_cmp (current_time, when_timespec) < 0)
-        gettime (&current_time);
+        {
+          /* Note that gettime may call gettimeofday which, on some non-
+             compliant systems, clobbers the buffer used for localtime's result.
+             But it's ok here, because we use a gettimeofday wrapper that
+             saves and restores the buffer around the gettimeofday call.  */
+          gettime (&current_time);
+        }
 
       /* Consider a time to be recent if it is within the past six months.
          A Gregorian year has 365.2425 * 24 * 60 * 60 == 31556952 seconds
@@ -4012,7 +3858,7 @@ print_long_format (const struct fileinfo *f)
       /* We assume here that all time zones are offset from UTC by a
          whole number of seconds.  */
       s = align_nstrftime (p, TIME_STAMP_LEN_MAXIMUM + 1, fmt,
-                           &when_local, localtz, when_timespec.tv_nsec);
+                           when_local, localtz, when_timespec.tv_nsec);
     }
 
   if (s || !*p)

@@ -360,11 +360,11 @@ nodist_src_coreutils_SOURCES = src/coreutils.h
 src_coreutils_SOURCES = src/coreutils.c
 
 src_cp_SOURCES = src/cp.c $(copy_sources) $(selinux_sources)
-src_dir_SOURCES = src/ls.c src/ls-dir.c
-src_vdir_SOURCES = src/ls.c src/ls-vdir.c
+src_dir_SOURCES = src/ls.c src/ls-dir.c ../../tc_client/posix/tc_impl_posix.c
+src_vdir_SOURCES = src/ls.c src/ls-vdir.c ../../tc_client/posix/tc_impl_posix.c
 src_id_SOURCES = src/id.c src/group-list.c
 src_groups_SOURCES = src/groups.c src/group-list.c
-src_ls_SOURCES = src/ls.c src/ls-ls.c
+src_ls_SOURCES = src/ls.c src/ls-ls.c ../../tc_client/posix/tc_impl_posix.c
 src_ln_SOURCES = src/ln.c src/relpath.c src/relpath.h
 src_chown_SOURCES = src/chown.c src/chown-core.c
 src_chgrp_SOURCES = src/chgrp.c src/chown-core.c
