@@ -37,6 +37,7 @@
 
 #include <config.h>
 #include <sys/types.h>
+#include <libgen.h>
 
 #include <termios.h>
 #if HAVE_STROPTS_H
@@ -81,6 +82,8 @@
 # define SA_RESTART 0
 #endif
 
+#define DEFAULT_LOG_FILE "/tmp/tc_test_listdirs.log"
+
 #include "system.h"
 #include <fnmatch.h>
 
@@ -109,7 +112,7 @@
 #include "areadlink.h"
 #include "mbsalign.h"
 #include "dircolors.h"
-#include "tc_impl_posix.h"
+#include "tc_api.h"
 
 /* Include <sys/capability.h> last to avoid a clash of <sys/types.h>
    include guards with some premature versions of libcap.
@@ -160,6 +163,7 @@ enum filetype
     whiteout,
     arg_directory
   };
+
 
 /* Display letters and indicators for each filetype.
    Keep these in sync with enum filetype.  */
@@ -230,6 +234,9 @@ struct bin_str
 #if ! HAVE_TCGETPGRP
 # define tcgetpgrp(Fd) 0
 #endif
+
+static char exe_path[PATH_MAX];
+static char tc_config_path[PATH_MAX];
 
 static size_t quote_name (FILE *out, const char *name,
                           struct quoting_options const *options,
@@ -958,7 +965,7 @@ static struct obstack subdired_obstack;
 static struct obstack dev_ino_obstack;
 
 /* Push a pair onto the device/inode stack.  */
-/*static void
+static void
 dev_ino_push (dev_t dev, ino_t ino)
 {
   void *vdi;
@@ -971,7 +978,7 @@ dev_ino_push (dev_t dev, ino_t ino)
   di->st_dev = dev;
   di->st_ino = ino;
 }
-*/
+
 
 /* Pop a dev/ino struct off the global dev_ino_obstack
    and return that struct.  */
@@ -1206,44 +1213,71 @@ process_signals (void)
 
 static void tc_print_dir(char const *name, char const *realname, bool command_line_arg)
 {
-	struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
-	struct tc_attrs_masks masks = { 0 };
-	struct tc_attrs *cur_dirp = NULL;
-	int i=0, count = 0;
+  struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
+  struct tc_attrs_masks masks = { 0 };
+  struct tc_attrs *cur_dirp = NULL;
+  int i=0, count = 0;
+  static bool first = true;
 
-	masks.has_mode = 1;
-	masks.has_size = 1;
-	masks.has_atime = 1;
-	masks.has_mtime = 1;
-	masks.has_uid = 1;
-	masks.has_gid = 1;
-	masks.has_rdev = 1;
-	masks.has_nlink = 1;
-	masks.has_ctime = 1;
+  masks.has_uid = 1;
+  masks.has_gid = 1;
+  masks.has_rdev = 1;
+  masks.has_mode = 1;
+  masks.has_size = 1;
+  masks.has_atime = 1;
+  masks.has_mtime = 1;
+  masks.has_ctime = 1;
+  masks.has_nlink = 1;
 
-	contents->masks = masks;
+  contents->masks = masks;
 
-	tc_res res = posix_listdir(name, masks, 4096, &contents, &count);
+  clear_files();
 
-	if(res.okay == 0)
-	return;
+  if (LOOP_DETECT)
+    dev_ino_push(0, 0);
 
-	while(i < count) {
-		cur_dirp = (contents + i);
-		char *last = strrchr(cur_dirp->file.path, '/');
-		if (last != NULL)
-			printf("%s ", last+1);
+  tc_res res = tc_listdir(name, masks, 4096, &contents, &count);
 
-		i++;
-	}
+  if (res.okay == false)
+    return;
 
-	free(contents);
+  while(i < count) {
+    cur_dirp = (contents + i);
+    gobble_file (cur_dirp->file.path, unknown, NOT_AN_INODE_NUMBER, true, "");
+    i++;
+  }
+
+
+  if (recursive || print_dir_name)
+    {
+      if (!first)
+        DIRED_PUTCHAR ('\n');
+      first = false;
+      DIRED_INDENT ();
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      dired_pos += quote_name (stdout, realname ? realname : name,
+                               dirname_quoting_options, NULL);
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      DIRED_FPUTS_LITERAL (":\n", stdout);
+    }
+
+  sort_files ();
+
+  if (recursive)
+    extract_dirs_from_files (name, command_line_arg);
+
+  if (cwd_n_used)
+    print_current_files ();
+
+  free(contents);
 }
 
 int
 main (int argc, char **argv)
 {
   int i;
+  ssize_t bytes_read = 0;
+  void *context = NULL;
   struct pending *thispend;
   int n_files;
 
@@ -1285,6 +1319,20 @@ main (int argc, char **argv)
 
   initialize_exit_failure (LS_FAILURE);
   atexit (close_stdout);
+
+  bytes_read = readlink("/proc/self/exe", exe_path, PATH_MAX);
+  if (bytes_read < 0)
+    return 0;
+
+  snprintf(tc_config_path, PATH_MAX,
+           "%s/../../../config/tc.ganesha.conf", dirname(exe_path));
+  fprintf(stderr, "using config file: %s\n", tc_config_path);
+
+  context = tc_init(tc_config_path, DEFAULT_LOG_FILE, 77);
+  if (context == NULL) {
+    printf("error in initializing\n");
+    return 0;
+  }
 
   assert (ARRAY_CARDINALITY (color_indicator) + 1
           == ARRAY_CARDINALITY (indicator_name));
@@ -1391,6 +1439,7 @@ main (int argc, char **argv)
       obstack_init (&subdired_obstack);
     }
 
+
   cwd_n_alloc = 100;
   cwd_file = xnmalloc (cwd_n_alloc, sizeof *cwd_file);
   cwd_n_used = 0;
@@ -1448,7 +1497,7 @@ main (int argc, char **argv)
               struct dev_ino di = dev_ino_pop ();
               struct dev_ino *found = hash_delete (active_dir_set, &di);
               /* ASSERT_MATCHING_DEV_INO (thispend->realname, di); */
-              assert (found);
+              //assert (found);
               dev_ino_free (found);
               free_pending_ent (thispend);
               continue;
@@ -1460,7 +1509,10 @@ main (int argc, char **argv)
 
       free_pending_ent (thispend);
       print_dir_name = true;
+
     }
+
+  tc_deinit(context);
 
   if (print_with_color)
     {
@@ -2772,6 +2824,15 @@ has_capability_cache (char const *file, struct fileinfo *f)
   return b;
 }
 
+static void copy_attrs_stat(struct stat *f, struct tc_attrs *attr)
+{
+	f->st_mode = attr->mode;
+	f->st_uid = attr->uid;
+	f->st_gid = attr->gid;
+	f->st_rdev = attr->rdev;
+	f->st_nlink = attr->nlink;
+}
+
 /* Add a file to the current table of files.
    Verify that the file exists, and print an error message if it does not.
    Return the number of blocks that the file occupies.  */
@@ -2781,6 +2842,24 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
 {
   uintmax_t blocks = 0;
   struct fileinfo *f;
+  tc_res result = { .okay = true, .index = -1, .err_no = 0 };
+
+  struct tc_attrs *read_attr = (struct tc_attrs *)calloc(1, sizeof(struct tc_attrs));
+  tc_file fl = tc_file_from_path(name);
+
+  /* set tc_file */
+  read_attr->file = fl;
+
+  /* set masks */
+  read_attr->masks.has_uid = 1;
+  read_attr->masks.has_gid = 1;
+  read_attr->masks.has_mode = 1;
+  read_attr->masks.has_size = 1;
+  read_attr->masks.has_rdev = 1;
+  read_attr->masks.has_atime = 1;
+  read_attr->masks.has_mtime = 1;
+  read_attr->masks.has_ctime = 1;
+  read_attr->masks.has_nlink = 1;
 
   /* An inode value prior to gobble_file necessarily came from readdir,
      which is not used for command line arguments.  */
@@ -2840,6 +2919,7 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
       bool do_deref;
       int err;
 
+
       if (name[0] == '/' || dirname[0] == 0)
         absolute_name = (char *) name;
       else
@@ -2851,7 +2931,14 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
       switch (dereference)
         {
         case DEREF_ALWAYS:
-          err = stat (absolute_name, &f->stat);
+          //err = stat (absolute_name, &f->stat);
+	  result = tc_getattrsv(read_attr, 1, 0);
+	  if (result.okay == false)
+            err = result.err_no;
+	  else {
+	    copy_attrs_stat(&f->stat, read_attr);
+	    err = 0;
+	  }
           do_deref = true;
           break;
 
@@ -2860,7 +2947,15 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
           if (command_line_arg)
             {
               bool need_lstat;
-              err = stat (absolute_name, &f->stat);
+              //err = stat (absolute_name, &f->stat);
+	      result = tc_getattrsv(read_attr, 1, 0);
+	      if (result.okay == false)
+                err = result.err_no;
+              else {
+                copy_attrs_stat(&f->stat, read_attr);
+                err = 0;
+	      }
+
               do_deref = true;
 
               if (dereference == DEREF_COMMAND_LINE_ARGUMENTS)
@@ -2879,11 +2974,19 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
             }
 
         default: /* DEREF_NEVER */
-          err = lstat (absolute_name, &f->stat);
+          //err = lstat (absolute_name, &f->stat);
+          result = tc_getattrsv(read_attr, 1, 0);
+	  if (result.okay == false)
+            err = result.err_no;
+          else {
+            copy_attrs_stat(&f->stat, read_attr);
+            err = 0;
+	  }
           do_deref = false;
           break;
         }
 
+      free(read_attr);
       if (err != 0)
         {
           /* Failure to stat a command line argument leads to
@@ -3430,6 +3533,7 @@ initialize_ordering_vector (void)
   size_t i;
   for (i = 0; i < cwd_n_used; i++)
     sorted_file[i] = &cwd_file[i];
+
 }
 
 /* Sort the files now in the table.  */
