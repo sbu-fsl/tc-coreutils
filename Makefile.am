@@ -221,7 +221,8 @@ MOSTLYCLEANFILES =
 CLEANFILES =
 MOSTLYCLEANDIRS =
 
-AM_CPPFLAGS = -Ilib -I$(top_srcdir)/lib -Isrc -I$(top_srcdir)/src
+AM_CPPFLAGS = -Ilib -I$(top_srcdir)/lib -Isrc -I$(top_srcdir)/src \
+              -I../../tc_client/include
 
 include $(top_srcdir)/lib/local.mk
 include $(top_srcdir)/src/local.mk
