@@ -35,9 +35,13 @@
    Flaherty <dennisf@denix.elk.miles.com> based on original patches by
    Greg Lee <lee@uhunix.uhcc.hawaii.edu>.  */
 
+#define NFS4TC
+
 #include <config.h>
 #include <sys/types.h>
+#ifdef NFS4TC
 #include <libgen.h>
+#endif
 
 #include <termios.h>
 #if HAVE_STROPTS_H
@@ -82,8 +86,6 @@
 # define SA_RESTART 0
 #endif
 
-#define DEFAULT_LOG_FILE "/tmp/tc_test_listdirs.log"
-
 #include "system.h"
 #include <fnmatch.h>
 
@@ -112,7 +114,10 @@
 #include "areadlink.h"
 #include "mbsalign.h"
 #include "dircolors.h"
+#ifdef NFS4TC
 #include "tc_api.h"
+#define DEFAULT_LOG_FILE "/tmp/nfs4tc-coreutils-ls.log"
+#endif
 
 /* Include <sys/capability.h> last to avoid a clash of <sys/types.h>
    include guards with some premature versions of libcap.
@@ -146,6 +151,18 @@
    on readdir-supplied d_ino values, or whether we must incur the cost of
    calling stat or lstat to obtain each guaranteed-valid inode number.  */
 
+#ifndef NFS4TC
+#ifndef READDIR_LIES_ABOUT_MOUNTPOINT_D_INO
+# define READDIR_LIES_ABOUT_MOUNTPOINT_D_INO 1
+#endif
+
+#if READDIR_LIES_ABOUT_MOUNTPOINT_D_INO
+# define RELIABLE_D_INO(dp) NOT_AN_INODE_NUMBER
+#else
+# define RELIABLE_D_INO(dp) D_INO (dp)
+#endif
+#endif
+
 #if ! HAVE_STRUCT_STAT_ST_AUTHOR
 # define st_author st_uid
 #endif
@@ -163,7 +180,6 @@ enum filetype
     whiteout,
     arg_directory
   };
-
 
 /* Display letters and indicators for each filetype.
    Keep these in sync with enum filetype.  */
@@ -235,14 +251,16 @@ struct bin_str
 # define tcgetpgrp(Fd) 0
 #endif
 
+#ifdef NFS4TC
 static char exe_path[PATH_MAX];
 static char tc_config_path[PATH_MAX];
-
+#endif
 static size_t quote_name (FILE *out, const char *name,
                           struct quoting_options const *options,
                           size_t *width);
 static char *make_link_name (char const *name, char const *linkname);
 static int decode_switches (int argc, char **argv);
+static bool file_ignored (char const *name);
 static uintmax_t gobble_file (char const *name, enum filetype type,
                               ino_t inode, bool command_line_arg,
                               char const *dirname);
@@ -259,6 +277,10 @@ static void get_link_name (char const *filename, struct fileinfo *f,
 static void indent (size_t from, size_t to);
 static size_t calculate_columns (bool by_columns);
 static void print_current_files (void);
+#ifndef NFS4TC
+static void print_dir (char const *name, char const *realname,
+                       bool command_line_arg);
+#endif
 static size_t print_file_name_and_frills (const struct fileinfo *f,
                                           size_t start_col);
 static void print_horizontal (void);
@@ -979,7 +1001,6 @@ dev_ino_push (dev_t dev, ino_t ino)
   di->st_ino = ino;
 }
 
-
 /* Pop a dev/ino struct off the global dev_ino_obstack
    and return that struct.  */
 static struct dev_ino
@@ -1105,7 +1126,38 @@ dev_ino_free (void *x)
    active directories.  Return true if there is already a matching
    entry in the table.  */
 
-//static bool visit_dir (dev_t dev, ino_t ino)
+#ifndef NFS4TC
+static bool
+visit_dir (dev_t dev, ino_t ino)
+{
+  struct dev_ino *ent;
+  struct dev_ino *ent_from_table;
+  bool found_match;
+
+  ent = xmalloc (sizeof *ent);
+  ent->st_ino = ino;
+  ent->st_dev = dev;
+
+  /* Attempt to insert this entry into the table.  */
+  ent_from_table = hash_insert (active_dir_set, ent);
+
+  if (ent_from_table == NULL)
+    {
+      /* Insertion failed due to lack of memory.  */
+      xalloc_die ();
+    }
+
+  found_match = (ent_from_table != ent);
+
+  if (found_match)
+    {
+      /* ent was not inserted, so free it.  */
+      free (ent);
+    }
+
+  return found_match;
+}
+#endif
 
 static void
 free_pending_ent (struct pending *p)
@@ -1211,9 +1263,11 @@ process_signals (void)
     }
 }
 
-static void tc_print_dir(char const *name, char const *realname, bool command_line_arg)
-{
-  struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
+#ifdef NFS4TC
+static void tc_print_dir(char const *name, char const *realname,
+                         bool command_line_arg) {
+  struct tc_attrs *contents =
+      (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
   struct tc_attrs_masks masks = { 0 };
   struct tc_attrs *cur_dirp = NULL;
   int i=0, count = 0;
@@ -1236,7 +1290,7 @@ static void tc_print_dir(char const *name, char const *realname, bool command_li
   if (LOOP_DETECT)
     dev_ino_push(0, 0);
 
-  tc_res res = tc_listdir(name, masks, 4096, &contents, &count);
+  tc_res res = tc_listdir(name, masks, 4096, false, &contents, &count);
 
   if (res.okay == false)
     return;
@@ -1271,13 +1325,16 @@ static void tc_print_dir(char const *name, char const *realname, bool command_li
 
   free(contents);
 }
+#endif
 
 int
 main (int argc, char **argv)
 {
   int i;
+#ifdef NFS4TC
   ssize_t bytes_read = 0;
   void *context = NULL;
+#endif
   struct pending *thispend;
   int n_files;
 
@@ -1320,6 +1377,7 @@ main (int argc, char **argv)
   initialize_exit_failure (LS_FAILURE);
   atexit (close_stdout);
 
+#ifdef NFS4TC
   bytes_read = readlink("/proc/self/exe", exe_path, PATH_MAX);
   if (bytes_read < 0)
     return 0;
@@ -1333,6 +1391,7 @@ main (int argc, char **argv)
     printf("error in initializing\n");
     return 0;
   }
+#endif
 
   assert (ARRAY_CARDINALITY (color_indicator) + 1
           == ARRAY_CARDINALITY (indicator_name));
@@ -1439,7 +1498,6 @@ main (int argc, char **argv)
       obstack_init (&subdired_obstack);
     }
 
-
   cwd_n_alloc = 100;
   cwd_file = xnmalloc (cwd_n_alloc, sizeof *cwd_file);
   cwd_n_used = 0;
@@ -1497,22 +1555,30 @@ main (int argc, char **argv)
               struct dev_ino di = dev_ino_pop ();
               struct dev_ino *found = hash_delete (active_dir_set, &di);
               /* ASSERT_MATCHING_DEV_INO (thispend->realname, di); */
-              //assert (found);
+#ifndef NFS4TC
+              assert (found);
+#endif
               dev_ino_free (found);
               free_pending_ent (thispend);
               continue;
             }
         }
 
+#ifdef NFS4TC
       tc_print_dir (thispend->name, thispend->realname,
                  thispend->command_line_arg);
+#else
+      print_dir (thispend->name, thispend->realname,
+                 thispend->command_line_arg);
+#endif
 
       free_pending_ent (thispend);
       print_dir_name = true;
-
     }
 
+#ifdef NFS4TC
   tc_deinit(context);
+#endif
 
   if (print_with_color)
     {
@@ -2612,7 +2678,167 @@ queue_directory (char const *name, char const *realname, bool command_line_arg)
    this is used for symbolic links to directories.
    COMMAND_LINE_ARG means this directory was mentioned on the command line.  */
 
-//print_dir
+#ifndef NFS4TC
+static void
+print_dir (char const *name, char const *realname, bool command_line_arg)
+{
+  DIR *dirp;
+  struct dirent *next;
+  uintmax_t total_blocks = 0;
+  static bool first = true;
+
+  errno = 0;
+  dirp = opendir (name);
+  if (!dirp)
+    {
+      file_failure (command_line_arg, _("cannot open directory %s"), name);
+      return;
+    }
+
+  if (LOOP_DETECT)
+    {
+      struct stat dir_stat;
+      int fd = dirfd (dirp);
+
+      /* If dirfd failed, endure the overhead of using stat.  */
+      if ((0 <= fd
+           ? fstat (fd, &dir_stat)
+           : stat (name, &dir_stat)) < 0)
+        {
+          file_failure (command_line_arg,
+                        _("cannot determine device and inode of %s"), name);
+          closedir (dirp);
+          return;
+        }
+
+      /* If we've already visited this dev/inode pair, warn that
+         we've found a loop, and do not process this directory.  */
+      if (visit_dir (dir_stat.st_dev, dir_stat.st_ino))
+        {
+          error (0, 0, _("%s: not listing already-listed directory"),
+                 quotef (name));
+          closedir (dirp);
+          set_exit_status (true);
+          return;
+        }
+
+      dev_ino_push (dir_stat.st_dev, dir_stat.st_ino);
+    }
+
+  if (recursive || print_dir_name)
+    {
+      if (!first)
+        DIRED_PUTCHAR ('\n');
+      first = false;
+      DIRED_INDENT ();
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      dired_pos += quote_name (stdout, realname ? realname : name,
+                               dirname_quoting_options, NULL);
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      DIRED_FPUTS_LITERAL (":\n", stdout);
+    }
+
+  /* Read the directory entries, and insert the subfiles into the 'cwd_file'
+     table.  */
+
+  clear_files ();
+
+  while (1)
+    {
+      /* Set errno to zero so we can distinguish between a readdir failure
+         and when readdir simply finds that there are no more entries.  */
+      errno = 0;
+      next = readdir (dirp);
+      if (next)
+        {
+          if (! file_ignored (next->d_name))
+            {
+              enum filetype type = unknown;
+
+#if HAVE_STRUCT_DIRENT_D_TYPE
+              switch (next->d_type)
+                {
+                case DT_BLK:  type = blockdev;		break;
+                case DT_CHR:  type = chardev;		break;
+                case DT_DIR:  type = directory;		break;
+                case DT_FIFO: type = fifo;		break;
+                case DT_LNK:  type = symbolic_link;	break;
+                case DT_REG:  type = normal;		break;
+                case DT_SOCK: type = sock;		break;
+# ifdef DT_WHT
+                case DT_WHT:  type = whiteout;		break;
+# endif
+                }
+#endif
+              total_blocks += gobble_file (next->d_name, type,
+                                           RELIABLE_D_INO (next),
+                                           false, name);
+
+              /* In this narrow case, print out each name right away, so
+                 ls uses constant memory while processing the entries of
+                 this directory.  Useful when there are many (millions)
+                 of entries in a directory.  */
+              if (format == one_per_line && sort_type == sort_none
+                      && !print_block_size && !recursive)
+                {
+                  /* We must call sort_files in spite of
+                     "sort_type == sort_none" for its initialization
+                     of the sorted_file vector.  */
+                  sort_files ();
+                  print_current_files ();
+                  clear_files ();
+                }
+            }
+        }
+      else if (errno != 0)
+        {
+          file_failure (command_line_arg, _("reading directory %s"), name);
+          if (errno != EOVERFLOW)
+            break;
+        }
+      else
+        break;
+
+      /* When processing a very large directory, and since we've inhibited
+         interrupts, this loop would take so long that ls would be annoyingly
+         uninterruptible.  This ensures that it handles signals promptly.  */
+      process_signals ();
+    }
+
+  if (closedir (dirp) != 0)
+    {
+      file_failure (command_line_arg, _("closing directory %s"), name);
+      /* Don't return; print whatever we got.  */
+    }
+
+  /* Sort the directory contents.  */
+  sort_files ();
+
+  /* If any member files are subdirectories, perhaps they should have their
+     contents listed rather than being mentioned here as files.  */
+
+  if (recursive)
+    extract_dirs_from_files (name, false);
+
+  if (format == long_format || print_block_size)
+    {
+      const char *p;
+      char buf[LONGEST_HUMAN_READABLE + 1];
+
+      DIRED_INDENT ();
+      p = _("total");
+      DIRED_FPUTS (p, stdout, strlen (p));
+      DIRED_PUTCHAR (' ');
+      p = human_readable (total_blocks, buf, human_output_opts,
+                          ST_NBLOCKSIZE, output_block_size);
+      DIRED_FPUTS (p, stdout, strlen (p));
+      DIRED_PUTCHAR ('\n');
+    }
+
+  if (cwd_n_used)
+    print_current_files ();
+}
+#endif
 
 /* Add 'pattern' to the list of patterns for which files that match are
    not listed.  */
@@ -2631,7 +2857,7 @@ add_ignore_pattern (const char *pattern)
 
 /* Return true if one of the PATTERNS matches FILE.  */
 
-/*static bool
+static bool
 patterns_match (struct ignore_pattern const *patterns, char const *file)
 {
   struct ignore_pattern const *p;
@@ -2640,11 +2866,11 @@ patterns_match (struct ignore_pattern const *patterns, char const *file)
       return true;
   return false;
 }
-*/
 
 /* Return true if FILE should be ignored.  */
 
-/*static bool file_ignored (char const *name)
+static bool
+file_ignored (char const *name)
 {
   return ((ignore_mode != IGNORE_MINIMAL
            && name[0] == '.'
@@ -2653,7 +2879,6 @@ patterns_match (struct ignore_pattern const *patterns, char const *file)
               && patterns_match (hide_patterns, name))
           || patterns_match (ignore_patterns, name));
 }
-*/
 
 /* POSIX requires that a file size be printed without a sign, even
    when negative.  Assume the typical case where negative sizes are
@@ -2824,15 +3049,6 @@ has_capability_cache (char const *file, struct fileinfo *f)
   return b;
 }
 
-static void copy_attrs_stat(struct stat *f, struct tc_attrs *attr)
-{
-	f->st_mode = attr->mode;
-	f->st_uid = attr->uid;
-	f->st_gid = attr->gid;
-	f->st_rdev = attr->rdev;
-	f->st_nlink = attr->nlink;
-}
-
 /* Add a file to the current table of files.
    Verify that the file exists, and print an error message if it does not.
    Return the number of blocks that the file occupies.  */
@@ -2842,24 +3058,14 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
 {
   uintmax_t blocks = 0;
   struct fileinfo *f;
+#ifdef NFS4TC
   tc_res result = { .okay = true, .index = -1, .err_no = 0 };
 
-  struct tc_attrs *read_attr = (struct tc_attrs *)calloc(1, sizeof(struct tc_attrs));
-  tc_file fl = tc_file_from_path(name);
-
-  /* set tc_file */
-  read_attr->file = fl;
-
-  /* set masks */
-  read_attr->masks.has_uid = 1;
-  read_attr->masks.has_gid = 1;
-  read_attr->masks.has_mode = 1;
-  read_attr->masks.has_size = 1;
-  read_attr->masks.has_rdev = 1;
-  read_attr->masks.has_atime = 1;
-  read_attr->masks.has_mtime = 1;
-  read_attr->masks.has_ctime = 1;
-  read_attr->masks.has_nlink = 1;
+  struct tc_attrs read_attr = {
+	  .file = tc_file_from_path(name),
+	  .masks = TC_ATTRS_MASK_ALL,
+  };
+#endif
 
   /* An inode value prior to gobble_file necessarily came from readdir,
      which is not used for command line arguments.  */
@@ -2919,7 +3125,6 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
       bool do_deref;
       int err;
 
-
       if (name[0] == '/' || dirname[0] == 0)
         absolute_name = (char *) name;
       else
@@ -2931,14 +3136,17 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
       switch (dereference)
         {
         case DEREF_ALWAYS:
-          //err = stat (absolute_name, &f->stat);
-	  result = tc_getattrsv(read_attr, 1, 0);
+#ifdef NFS4TC
+	  result = tc_getattrsv(&read_attr, 1, 0);
 	  if (result.okay == false)
             err = result.err_no;
 	  else {
-	    copy_attrs_stat(&f->stat, read_attr);
+	    tc_attrs2stat(&read_attr, &f->stat);
 	    err = 0;
 	  }
+#else
+          err = stat (absolute_name, &f->stat);
+#endif
           do_deref = true;
           break;
 
@@ -2947,15 +3155,17 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
           if (command_line_arg)
             {
               bool need_lstat;
-              //err = stat (absolute_name, &f->stat);
-	      result = tc_getattrsv(read_attr, 1, 0);
+#ifdef NFS4TC
+	      result = tc_getattrsv(&read_attr, 1, 0);
 	      if (result.okay == false)
                 err = result.err_no;
               else {
-                copy_attrs_stat(&f->stat, read_attr);
+                tc_attrs2stat(&read_attr, &f->stat);
                 err = 0;
 	      }
-
+#else
+              err = stat (absolute_name, &f->stat);
+#endif
               do_deref = true;
 
               if (dereference == DEREF_COMMAND_LINE_ARGUMENTS)
@@ -2974,19 +3184,21 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
             }
 
         default: /* DEREF_NEVER */
-          //err = lstat (absolute_name, &f->stat);
-          result = tc_getattrsv(read_attr, 1, 0);
+#ifdef NFS4TC
+          result = tc_getattrsv(&read_attr, 1, 0);
 	  if (result.okay == false)
             err = result.err_no;
           else {
-            copy_attrs_stat(&f->stat, read_attr);
+            tc_attrs2stat(&read_attr, &f->stat);
             err = 0;
 	  }
+#else
+          err = lstat (absolute_name, &f->stat);
+#endif
           do_deref = false;
           break;
         }
 
-      free(read_attr);
       if (err != 0)
         {
           /* Failure to stat a command line argument leads to
@@ -3533,7 +3745,6 @@ initialize_ordering_vector (void)
   size_t i;
   for (i = 0; i < cwd_n_used; i++)
     sorted_file[i] = &cwd_file[i];
-
 }
 
 /* Sort the files now in the table.  */
