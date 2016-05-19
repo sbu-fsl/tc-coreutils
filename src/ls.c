@@ -238,6 +238,8 @@ struct bin_str
 static char exe_path[PATH_MAX];
 static char tc_config_path[PATH_MAX];
 
+static void tc_print_dir(char const *name, char const *realname, bool command_line_arg);
+
 static size_t quote_name (FILE *out, const char *name,
                           struct quoting_options const *options,
                           size_t *width);
@@ -1209,67 +1211,6 @@ process_signals (void)
       /* If execution reaches here, then the program has been
          continued (after being suspended).  */
     }
-}
-
-static void tc_print_dir(char const *name, char const *realname, bool command_line_arg)
-{
-  struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
-  struct tc_attrs_masks masks = { 0 };
-  struct tc_attrs *cur_dirp = NULL;
-  int i=0, count = 0;
-  static bool first = true;
-
-  masks.has_uid = 1;
-  masks.has_gid = 1;
-  masks.has_rdev = 1;
-  masks.has_mode = 1;
-  masks.has_size = 1;
-  masks.has_atime = 1;
-  masks.has_mtime = 1;
-  masks.has_ctime = 1;
-  masks.has_nlink = 1;
-
-  contents->masks = masks;
-
-  clear_files();
-
-  if (LOOP_DETECT)
-    dev_ino_push(0, 0);
-
-  tc_res res = tc_listdir(name, masks, 4096, &contents, &count);
-
-  if (res.okay == false)
-    return;
-
-  while(i < count) {
-    cur_dirp = (contents + i);
-    gobble_file (cur_dirp->file.path, unknown, NOT_AN_INODE_NUMBER, true, "");
-    i++;
-  }
-
-
-  if (recursive || print_dir_name)
-    {
-      if (!first)
-        DIRED_PUTCHAR ('\n');
-      first = false;
-      DIRED_INDENT ();
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      dired_pos += quote_name (stdout, realname ? realname : name,
-                               dirname_quoting_options, NULL);
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      DIRED_FPUTS_LITERAL (":\n", stdout);
-    }
-
-  sort_files ();
-
-  if (recursive)
-    extract_dirs_from_files (name, command_line_arg);
-
-  if (cwd_n_used)
-    print_current_files ();
-
-  free(contents);
 }
 
 int
@@ -2631,7 +2572,7 @@ add_ignore_pattern (const char *pattern)
 
 /* Return true if one of the PATTERNS matches FILE.  */
 
-/*static bool
+static bool
 patterns_match (struct ignore_pattern const *patterns, char const *file)
 {
   struct ignore_pattern const *p;
@@ -2640,11 +2581,11 @@ patterns_match (struct ignore_pattern const *patterns, char const *file)
       return true;
   return false;
 }
-*/
+
 
 /* Return true if FILE should be ignored.  */
 
-/*static bool file_ignored (char const *name)
+static bool file_ignored (char const *name)
 {
   return ((ignore_mode != IGNORE_MINIMAL
            && name[0] == '.'
@@ -2653,7 +2594,7 @@ patterns_match (struct ignore_pattern const *patterns, char const *file)
               && patterns_match (hide_patterns, name))
           || patterns_match (ignore_patterns, name));
 }
-*/
+
 
 /* POSIX requires that a file size be printed without a sign, even
    when negative.  Assume the typical case where negative sizes are
@@ -4925,3 +4866,111 @@ Exit status:\n\
     }
   exit (status);
 }
+
+
+static void tc_print_dir(char const *name, char const *realname, bool command_line_arg)
+{
+  struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
+  struct tc_attrs_masks masks = { 0 };
+  struct tc_attrs *cur_dirp = NULL;
+  int i=0, count = 0;
+  static bool first = true;
+
+  masks.has_uid = 1;
+  masks.has_gid = 1;
+  masks.has_rdev = 1;
+  masks.has_mode = 1;
+  masks.has_size = 1;
+  masks.has_atime = 1;
+  masks.has_mtime = 1;
+  masks.has_ctime = 1;
+  masks.has_nlink = 1;
+
+  contents->masks = masks;
+
+  clear_files();
+
+  if (LOOP_DETECT)
+    dev_ino_push(0, 0);
+
+  tc_res res = tc_listdir(name, masks, 4096, &contents, &count);
+
+  if (res.okay == false)
+    return;
+
+  while(i < count) {
+    cur_dirp = (contents + i);
+    enum filetype type = unknown;
+
+    if (! file_ignored (cur_dirp->file.path))
+    {
+	unsigned int type_x = DT_UNKNOWN;
+
+#if HAVE_STRUCT_DIRENT_D_TYPE
+       if(S_ISDIR(cur_dirp->mode)){
+		type_x = DT_DIR;
+       }
+       else if(S_ISCHR(cur_dirp->mode)) {
+		type = DT_CHR;
+       }
+       else if(S_ISBLK(cur_dirp->mode)) {
+		type_x = DT_BLK;
+       }
+       else if(S_ISFIFO(cur_dirp->mode)) {
+		type_x = DT_FIFO;
+       }
+       else if(S_ISLNK(cur_dirp->mode)) {
+		type_x = DT_LNK;
+       }
+       else if(S_ISREG(cur_dirp->mode)) {
+		type_x = DT_REG;
+       }
+       else if(S_ISSOCK(cur_dirp->mode)) {
+		type_x = DT_SOCK;
+       }
+
+       switch (type_x)
+       {
+          case DT_BLK:  type = blockdev;	break;
+          case DT_CHR:  type = chardev;		break;
+          case DT_DIR:  type = directory;	break;
+          case DT_FIFO: type = fifo;		break;
+          case DT_LNK:  type = symbolic_link;	break;
+          case DT_REG:  type = normal;		break;
+          case DT_SOCK: type = sock;		break;
+# ifdef DT_WHT
+          case DT_WHT:  type = whiteout;	break;
+# endif
+       }
+#endif
+    gobble_file (cur_dirp->file.path, type, NOT_AN_INODE_NUMBER, false, name);
+
+    }
+    i++;
+  }
+
+
+  if (recursive || print_dir_name)
+    {
+      if (!first)
+        DIRED_PUTCHAR ('\n');
+      first = false;
+      DIRED_INDENT ();
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      dired_pos += quote_name (stdout, realname ? realname : name,
+                               dirname_quoting_options, NULL);
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      DIRED_FPUTS_LITERAL (":\n", stdout);
+    }
+
+  sort_files ();
+
+  if (recursive)
+    extract_dirs_from_files (name, command_line_arg);
+
+  if (cwd_n_used)
+    print_current_files ();
+
+  free(contents);
+}
+
