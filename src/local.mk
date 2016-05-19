@@ -111,7 +111,8 @@ LIB_TC = ../../tc_client/$(build_type)/tc/libtc_impl.a \
          ../../tc_client/$(build_type)/libntirpc/src/libntirpc.a \
          ../../tc_client/$(build_type)/os/libgos.a \
          ../../tc_client/$(build_type)/util/libpath_utils.a -lstdc++ \
-         ../../tc_client/$(build_type)/log/liblog.a
+         ../../tc_client/$(build_type)/log/liblog.a \
+         ../../tc_client/$(build_type)/support/tc_helper.a
 
 ADDITIONAL_LIBS = -lwbclient -ljemalloc -lcap -lblkid -luuid -ldl -lkrb5 \
                   -lk5crypto -lcom_err -lgssapi_krb5 -lnfsidmap
