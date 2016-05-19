@@ -181,6 +181,7 @@ enum filetype
     arg_directory
   };
 
+
 /* Display letters and indicators for each filetype.
    Keep these in sync with enum filetype.  */
 static char const filetype_letter[] = "?pcdb-lswd";
@@ -254,13 +255,16 @@ struct bin_str
 #ifdef NFS4TC
 static char exe_path[PATH_MAX];
 static char tc_config_path[PATH_MAX];
+
+static void tc_print_dir(char const *name, char const *realname,
+                         bool command_line_arg);
 #endif
+
 static size_t quote_name (FILE *out, const char *name,
                           struct quoting_options const *options,
                           size_t *width);
 static char *make_link_name (char const *name, char const *linkname);
 static int decode_switches (int argc, char **argv);
-static bool file_ignored (char const *name);
 static uintmax_t gobble_file (char const *name, enum filetype type,
                               ino_t inode, bool command_line_arg,
                               char const *dirname);
@@ -1001,6 +1005,7 @@ dev_ino_push (dev_t dev, ino_t ino)
   di->st_ino = ino;
 }
 
+
 /* Pop a dev/ino struct off the global dev_ino_obstack
    and return that struct.  */
 static struct dev_ino
@@ -1498,6 +1503,7 @@ main (int argc, char **argv)
       obstack_init (&subdired_obstack);
     }
 
+
   cwd_n_alloc = 100;
   cwd_file = xnmalloc (cwd_n_alloc, sizeof *cwd_file);
   cwd_n_used = 0;
@@ -1566,7 +1572,7 @@ main (int argc, char **argv)
 
 #ifdef NFS4TC
       tc_print_dir (thispend->name, thispend->realname,
-                 thispend->command_line_arg);
+                    thispend->command_line_arg);
 #else
       print_dir (thispend->name, thispend->realname,
                  thispend->command_line_arg);
@@ -1574,6 +1580,7 @@ main (int argc, char **argv)
 
       free_pending_ent (thispend);
       print_dir_name = true;
+
     }
 
 #ifdef NFS4TC
@@ -2867,10 +2874,10 @@ patterns_match (struct ignore_pattern const *patterns, char const *file)
   return false;
 }
 
+
 /* Return true if FILE should be ignored.  */
 
-static bool
-file_ignored (char const *name)
+static bool file_ignored (char const *name)
 {
   return ((ignore_mode != IGNORE_MINIMAL
            && name[0] == '.'
@@ -2879,6 +2886,7 @@ file_ignored (char const *name)
               && patterns_match (hide_patterns, name))
           || patterns_match (ignore_patterns, name));
 }
+
 
 /* POSIX requires that a file size be printed without a sign, even
    when negative.  Assume the typical case where negative sizes are
@@ -3049,6 +3057,15 @@ has_capability_cache (char const *file, struct fileinfo *f)
   return b;
 }
 
+static void copy_attrs_stat(struct stat *f, struct tc_attrs *attr)
+{
+	f->st_mode = attr->mode;
+	f->st_uid = attr->uid;
+	f->st_gid = attr->gid;
+	f->st_rdev = attr->rdev;
+	f->st_nlink = attr->nlink;
+}
+
 /* Add a file to the current table of files.
    Verify that the file exists, and print an error message if it does not.
    Return the number of blocks that the file occupies.  */
@@ -3125,6 +3142,7 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
       bool do_deref;
       int err;
 
+
       if (name[0] == '/' || dirname[0] == 0)
         absolute_name = (char *) name;
       else
@@ -3199,6 +3217,7 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
           break;
         }
 
+      free(read_attr);
       if (err != 0)
         {
           /* Failure to stat a command line argument leads to
@@ -3745,6 +3764,7 @@ initialize_ordering_vector (void)
   size_t i;
   for (i = 0; i < cwd_n_used; i++)
     sorted_file[i] = &cwd_file[i];
+
 }
 
 /* Sort the files now in the table.  */
@@ -5135,4 +5155,111 @@ Exit status:\n\
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
+}
+
+
+static void tc_print_dir(char const *name, char const *realname, bool command_line_arg)
+{
+  struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
+  struct tc_attrs_masks masks = { 0 };
+  struct tc_attrs *cur_dirp = NULL;
+  int i=0, count = 0;
+  static bool first = true;
+
+  masks.has_uid = 1;
+  masks.has_gid = 1;
+  masks.has_rdev = 1;
+  masks.has_mode = 1;
+  masks.has_size = 1;
+  masks.has_atime = 1;
+  masks.has_mtime = 1;
+  masks.has_ctime = 1;
+  masks.has_nlink = 1;
+
+  contents->masks = masks;
+
+  clear_files();
+
+  if (LOOP_DETECT)
+    dev_ino_push(0, 0);
+
+  tc_res res = tc_listdir(name, masks, 4096, &contents, &count);
+
+  if (res.okay == false)
+    return;
+
+  while(i < count) {
+    cur_dirp = (contents + i);
+    enum filetype type = unknown;
+
+    if (! file_ignored (cur_dirp->file.path))
+    {
+	unsigned int type_x = DT_UNKNOWN;
+
+#if HAVE_STRUCT_DIRENT_D_TYPE
+       if(S_ISDIR(cur_dirp->mode)){
+		type_x = DT_DIR;
+       }
+       else if(S_ISCHR(cur_dirp->mode)) {
+		type = DT_CHR;
+       }
+       else if(S_ISBLK(cur_dirp->mode)) {
+		type_x = DT_BLK;
+       }
+       else if(S_ISFIFO(cur_dirp->mode)) {
+		type_x = DT_FIFO;
+       }
+       else if(S_ISLNK(cur_dirp->mode)) {
+		type_x = DT_LNK;
+       }
+       else if(S_ISREG(cur_dirp->mode)) {
+		type_x = DT_REG;
+       }
+       else if(S_ISSOCK(cur_dirp->mode)) {
+		type_x = DT_SOCK;
+       }
+
+       switch (type_x)
+       {
+          case DT_BLK:  type = blockdev;	break;
+          case DT_CHR:  type = chardev;		break;
+          case DT_DIR:  type = directory;	break;
+          case DT_FIFO: type = fifo;		break;
+          case DT_LNK:  type = symbolic_link;	break;
+          case DT_REG:  type = normal;		break;
+          case DT_SOCK: type = sock;		break;
+# ifdef DT_WHT
+          case DT_WHT:  type = whiteout;	break;
+# endif
+       }
+#endif
+    gobble_file (cur_dirp->file.path, type, NOT_AN_INODE_NUMBER, false, name);
+
+    }
+    i++;
+  }
+
+
+  if (recursive || print_dir_name)
+    {
+      if (!first)
+        DIRED_PUTCHAR ('\n');
+      first = false;
+      DIRED_INDENT ();
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      dired_pos += quote_name (stdout, realname ? realname : name,
+                               dirname_quoting_options, NULL);
+      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
+      DIRED_FPUTS_LITERAL (":\n", stdout);
+    }
+
+  sort_files ();
+
+  if (recursive)
+    extract_dirs_from_files (name, command_line_arg);
+
+  if (cwd_n_used)
+    print_current_files ();
+
+  free(contents);
 }
