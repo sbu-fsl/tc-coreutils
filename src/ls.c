@@ -1268,70 +1268,6 @@ process_signals (void)
     }
 }
 
-#ifdef NFS4TC
-static void tc_print_dir(char const *name, char const *realname,
-                         bool command_line_arg) {
-  struct tc_attrs *contents =
-      (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
-  struct tc_attrs_masks masks = { 0 };
-  struct tc_attrs *cur_dirp = NULL;
-  int i=0, count = 0;
-  static bool first = true;
-
-  masks.has_uid = 1;
-  masks.has_gid = 1;
-  masks.has_rdev = 1;
-  masks.has_mode = 1;
-  masks.has_size = 1;
-  masks.has_atime = 1;
-  masks.has_mtime = 1;
-  masks.has_ctime = 1;
-  masks.has_nlink = 1;
-
-  contents->masks = masks;
-
-  clear_files();
-
-  if (LOOP_DETECT)
-    dev_ino_push(0, 0);
-
-  tc_res res = tc_listdir(name, masks, 4096, false, &contents, &count);
-
-  if (res.okay == false)
-    return;
-
-  while(i < count) {
-    cur_dirp = (contents + i);
-    gobble_file (cur_dirp->file.path, unknown, NOT_AN_INODE_NUMBER, true, "");
-    i++;
-  }
-
-
-  if (recursive || print_dir_name)
-    {
-      if (!first)
-        DIRED_PUTCHAR ('\n');
-      first = false;
-      DIRED_INDENT ();
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      dired_pos += quote_name (stdout, realname ? realname : name,
-                               dirname_quoting_options, NULL);
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      DIRED_FPUTS_LITERAL (":\n", stdout);
-    }
-
-  sort_files ();
-
-  if (recursive)
-    extract_dirs_from_files (name, command_line_arg);
-
-  if (cwd_n_used)
-    print_current_files ();
-
-  free(contents);
-}
-#endif
-
 int
 main (int argc, char **argv)
 {
@@ -3057,15 +2993,6 @@ has_capability_cache (char const *file, struct fileinfo *f)
   return b;
 }
 
-static void copy_attrs_stat(struct stat *f, struct tc_attrs *attr)
-{
-	f->st_mode = attr->mode;
-	f->st_uid = attr->uid;
-	f->st_gid = attr->gid;
-	f->st_rdev = attr->rdev;
-	f->st_nlink = attr->nlink;
-}
-
 /* Add a file to the current table of files.
    Verify that the file exists, and print an error message if it does not.
    Return the number of blocks that the file occupies.  */
@@ -3217,7 +3144,6 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
           break;
         }
 
-      free(read_attr);
       if (err != 0)
         {
           /* Failure to stat a command line argument leads to
@@ -5157,24 +5083,16 @@ Exit status:\n\
   exit (status);
 }
 
-
-static void tc_print_dir(char const *name, char const *realname, bool command_line_arg)
+#ifdef NFS4TC
+static void tc_print_dir(char const *name, char const *realname,
+                         bool command_line_arg)
 {
-  struct tc_attrs *contents = (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
-  struct tc_attrs_masks masks = { 0 };
+  struct tc_attrs *contents =
+      (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
+  struct tc_attrs_masks masks = TC_MASK_INIT_ALL;
   struct tc_attrs *cur_dirp = NULL;
   int i=0, count = 0;
   static bool first = true;
-
-  masks.has_uid = 1;
-  masks.has_gid = 1;
-  masks.has_rdev = 1;
-  masks.has_mode = 1;
-  masks.has_size = 1;
-  masks.has_atime = 1;
-  masks.has_mtime = 1;
-  masks.has_ctime = 1;
-  masks.has_nlink = 1;
 
   contents->masks = masks;
 
@@ -5183,12 +5101,12 @@ static void tc_print_dir(char const *name, char const *realname, bool command_li
   if (LOOP_DETECT)
     dev_ino_push(0, 0);
 
-  tc_res res = tc_listdir(name, masks, 4096, &contents, &count);
+  tc_res res = tc_listdir(name, masks, 4096, false, &contents, &count);
 
   if (res.okay == false)
     return;
 
-  while(i < count) {
+  while (i < count) {
     cur_dirp = (contents + i);
     enum filetype type = unknown;
 
@@ -5233,8 +5151,7 @@ static void tc_print_dir(char const *name, char const *realname, bool command_li
 # endif
        }
 #endif
-    gobble_file (cur_dirp->file.path, type, NOT_AN_INODE_NUMBER, false, name);
-
+      gobble_file(cur_dirp->file.path, type, NOT_AN_INODE_NUMBER, false, name);
     }
     i++;
   }
@@ -5263,3 +5180,4 @@ static void tc_print_dir(char const *name, char const *realname, bool command_li
 
   free(contents);
 }
+#endif
