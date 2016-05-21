@@ -35,13 +35,10 @@
    Flaherty <dennisf@denix.elk.miles.com> based on original patches by
    Greg Lee <lee@uhunix.uhcc.hawaii.edu>.  */
 
-#define NFS4TC
-
 #include <config.h>
 #include <sys/types.h>
-#ifdef NFS4TC
+
 #include <libgen.h>
-#endif
 
 #include <termios.h>
 #if HAVE_STROPTS_H
@@ -114,10 +111,11 @@
 #include "areadlink.h"
 #include "mbsalign.h"
 #include "dircolors.h"
-#ifdef NFS4TC
+
 #include "tc_api.h"
+#include "tc_helper.h"
+#include "path_utils.h"
 #define DEFAULT_LOG_FILE "/tmp/nfs4tc-coreutils-ls.log"
-#endif
 
 /* Include <sys/capability.h> last to avoid a clash of <sys/types.h>
    include guards with some premature versions of libcap.
@@ -151,7 +149,7 @@
    on readdir-supplied d_ino values, or whether we must incur the cost of
    calling stat or lstat to obtain each guaranteed-valid inode number.  */
 
-#ifndef NFS4TC
+#if 0
 #ifndef READDIR_LIES_ABOUT_MOUNTPOINT_D_INO
 # define READDIR_LIES_ABOUT_MOUNTPOINT_D_INO 1
 #endif
@@ -180,7 +178,6 @@ enum filetype
     whiteout,
     arg_directory
   };
-
 
 /* Display letters and indicators for each filetype.
    Keep these in sync with enum filetype.  */
@@ -252,22 +249,15 @@ struct bin_str
 # define tcgetpgrp(Fd) 0
 #endif
 
-#ifdef NFS4TC
-static char exe_path[PATH_MAX];
-static char tc_config_path[PATH_MAX];
-
-static void tc_print_dir(char const *name, char const *realname,
-                         bool command_line_arg);
-#endif
-
 static size_t quote_name (FILE *out, const char *name,
                           struct quoting_options const *options,
                           size_t *width);
 static char *make_link_name (char const *name, char const *linkname);
 static int decode_switches (int argc, char **argv);
+static bool file_ignored (char const *name);
 static uintmax_t gobble_file (char const *name, enum filetype type,
                               ino_t inode, bool command_line_arg,
-                              char const *dirname);
+                              char const *dirname, const struct stat *st);
 static bool print_color_indicator (const struct fileinfo *f,
                                    bool symlink_target);
 static void put_indicator (const struct bin_str *ind);
@@ -281,10 +271,8 @@ static void get_link_name (char const *filename, struct fileinfo *f,
 static void indent (size_t from, size_t to);
 static size_t calculate_columns (bool by_columns);
 static void print_current_files (void);
-#ifndef NFS4TC
 static void print_dir (char const *name, char const *realname,
-                       bool command_line_arg);
-#endif
+                       bool command_line_arg, const struct stat *st);
 static size_t print_file_name_and_frills (const struct fileinfo *f,
                                           size_t start_col);
 static void print_horizontal (void);
@@ -301,7 +289,7 @@ static bool print_type_indicator (bool stat_ok, mode_t mode,
                                   enum filetype type);
 static void print_with_separator (char sep);
 static void queue_directory (char const *name, char const *realname,
-                             bool command_line_arg);
+                             bool command_line_arg, const struct stat *st);
 static void sort_files (void);
 static void parse_ls_color (void);
 
@@ -365,10 +353,15 @@ struct pending
        link, otherwise zero.  */
     char *realname;
     bool command_line_arg;
+    struct stat st;
     struct pending *next;
   };
 
 static struct pending *pending_dirs;
+
+uintmax_t tc_total_blocks = 0;
+
+struct pending *cur_listing_dir = NULL;
 
 /* Current time in seconds and nanoseconds since 1970, updated as
    needed when deciding whether a file is recent.  */
@@ -1005,7 +998,6 @@ dev_ino_push (dev_t dev, ino_t ino)
   di->st_ino = ino;
 }
 
-
 /* Pop a dev/ino struct off the global dev_ino_obstack
    and return that struct.  */
 static struct dev_ino
@@ -1131,7 +1123,6 @@ dev_ino_free (void *x)
    active directories.  Return true if there is already a matching
    entry in the table.  */
 
-#ifndef NFS4TC
 static bool
 visit_dir (dev_t dev, ino_t ino)
 {
@@ -1162,7 +1153,6 @@ visit_dir (dev_t dev, ino_t ino)
 
   return found_match;
 }
-#endif
 
 static void
 free_pending_ent (struct pending *p)
@@ -1268,14 +1258,76 @@ process_signals (void)
     }
 }
 
+static enum filetype
+mode2type (mode_t mode)
+{
+  enum filetype ft;
+  if (S_ISDIR(mode))
+    ft = directory;
+  else if (S_ISCHR(mode))
+    ft = chardev;
+  else if (S_ISBLK(mode))
+    ft = blockdev;
+  else if (S_ISFIFO(mode))
+    ft = fifo;
+  else if (S_ISLNK(mode))
+    ft = symbolic_link;
+  else if(S_ISREG(mode))
+    ft = normal;
+  else if(S_ISSOCK(mode))
+    ft = sock;
+  else
+    ft = unknown;
+  return ft;
+}
+
+static bool
+listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
+{
+  struct stat st;
+  slice_t dirname = tc_path_dirname (tca->file.path);
+  slice_t basename = tc_path_basename (tca->file.path);
+  char *dirpath = NULL;
+
+  tc_attrs2stat (tca, &st);
+  dirpath = new_auto_str (dirname);
+  if (cmpslice (dirname, toslice(cur_listing_dir->name)) != 0)
+    {
+      print_dir (cur_listing_dir->name, cur_listing_dir->realname,
+                 cur_listing_dir->command_line_arg, &cur_listing_dir->st);
+
+      cur_listing_dir = cur_listing_dir->next;
+      assert(cur_listing_dir);
+      if (cmpslice(dirname, toslice(cur_listing_dir->name)) == 0)
+        {
+          error(1, EINVAL, "dirname: %.*s; cur_listing_dir->name: %s\n",
+                (int)dirname.size, dirname.data, cur_listing_dir->name);
+        }
+    }
+
+  if (! file_ignored (new_auto_str (basename)))
+    {
+      tc_attrs2stat (tca, &st);
+      tc_total_blocks += gobble_file (tca->file.path, mode2type(tca->mode),
+                                      (ino_t)tca->fileid, false, dirpath, &st);
+    }
+
+  return true;
+}
+
 int
 main (int argc, char **argv)
 {
   int i;
-#ifdef NFS4TC
-  ssize_t bytes_read = 0;
+
+#define TC_LIMIT 16
+  char tc_config_path[PATH_MAX];
   void *context = NULL;
-#endif
+  int rdcnt = 0;
+  tc_res tcres = { .err_no = 0 };
+  const char *dirs[TC_LIMIT];
+  struct pending *nextpend;
+
   struct pending *thispend;
   int n_files;
 
@@ -1318,21 +1370,15 @@ main (int argc, char **argv)
   initialize_exit_failure (LS_FAILURE);
   atexit (close_stdout);
 
-#ifdef NFS4TC
-  bytes_read = readlink("/proc/self/exe", exe_path, PATH_MAX);
-  if (bytes_read < 0)
-    return 0;
+  get_tc_config_file (tc_config_path, PATH_MAX);
+  fprintf (stderr, "using config file: %s\n", tc_config_path);
 
-  snprintf(tc_config_path, PATH_MAX,
-           "%s/../../../config/tc.ganesha.conf", dirname(exe_path));
-  fprintf(stderr, "using config file: %s\n", tc_config_path);
-
-  context = tc_init(tc_config_path, DEFAULT_LOG_FILE, 77);
-  if (context == NULL) {
-    printf("error in initializing\n");
-    return 0;
-  }
-#endif
+  context = tc_init (tc_config_path, DEFAULT_LOG_FILE, 77);
+  if (context == NULL)
+    {
+      printf("error in initializing\n");
+      return 1;
+    }
 
   assert (ARRAY_CARDINALITY (color_indicator) + 1
           == ARRAY_CARDINALITY (indicator_name));
@@ -1439,7 +1485,6 @@ main (int argc, char **argv)
       obstack_init (&subdired_obstack);
     }
 
-
   cwd_n_alloc = 100;
   cwd_file = xnmalloc (cwd_n_alloc, sizeof *cwd_file);
   cwd_n_used = 0;
@@ -1451,13 +1496,13 @@ main (int argc, char **argv)
   if (n_files <= 0)
     {
       if (immediate_dirs)
-        gobble_file (".", directory, NOT_AN_INODE_NUMBER, true, "");
+        gobble_file (".", directory, NOT_AN_INODE_NUMBER, true, "", NULL);
       else
-        queue_directory (".", NULL, true);
+        queue_directory (".", NULL, true, NULL);
     }
   else
     do
-      gobble_file (argv[i++], unknown, NOT_AN_INODE_NUMBER, true, "");
+      gobble_file (argv[i++], unknown, NOT_AN_INODE_NUMBER, true, "", NULL);
     while (i < argc);
 
   if (cwd_n_used)
@@ -1481,14 +1526,15 @@ main (int argc, char **argv)
   else if (n_files <= 1 && pending_dirs && pending_dirs->next == 0)
     print_dir_name = false;
 
+  cur_listing_dir = pending_dirs;
+
   while (pending_dirs)
     {
       thispend = pending_dirs;
-      pending_dirs = pending_dirs->next;
-
-      if (LOOP_DETECT)
+      rdcnt = 0;
+      while (rdcnt < TC_LIMIT && pending_dirs)
         {
-          if (thispend->name == NULL)
+          if (LOOP_DETECT && pending_dirs->name == NULL)
             {
               /* thispend->name == NULL means this is a marker entry
                  indicating we've finished processing the directory.
@@ -1497,31 +1543,45 @@ main (int argc, char **argv)
               struct dev_ino di = dev_ino_pop ();
               struct dev_ino *found = hash_delete (active_dir_set, &di);
               /* ASSERT_MATCHING_DEV_INO (thispend->realname, di); */
-#ifndef NFS4TC
-              assert (found);
-#endif
               dev_ino_free (found);
-              free_pending_ent (thispend);
-              continue;
+              nextpend = pending_dirs->next;
+              if (thispend == pending_dirs)
+                thispend = nextpend;
+              free_pending_ent (pending_dirs);
+              pending_dirs = nextpend;
+            }
+          else
+            {
+              dirs[rdcnt] = pending_dirs->name;
+              pending_dirs = pending_dirs->next;
+              ++rdcnt;
             }
         }
 
-#ifdef NFS4TC
-      tc_print_dir (thispend->name, thispend->realname,
-                    thispend->command_line_arg);
-#else
-      print_dir (thispend->name, thispend->realname,
-                 thispend->command_line_arg);
-#endif
+      tcres = tc_listdirv (dirs, rdcnt, TC_ATTRS_MASK_ALL, 0, recursive,
+                           listdir_cb, NULL, thispend);
+      if (!tc_okay(tcres))
+        {
+          error(tcres.err_no, tcres.err_no, "tc_listdirv failed\n");
+        }
 
-      free_pending_ent (thispend);
+      for (i = 0; i < rdcnt; ++i)
+        {
+          nextpend = thispend;
+          free_pending_ent (thispend);
+        }
+
       print_dir_name = true;
-
     }
 
-#ifdef NFS4TC
-  tc_deinit(context);
-#endif
+  if (cwd_n_used)
+    {
+      print_dir (cur_listing_dir->name, cur_listing_dir->realname,
+                 cur_listing_dir->command_line_arg, &cur_listing_dir->st);
+      cur_listing_dir = cur_listing_dir->next;
+      assert (!cur_listing_dir);
+    }
+  tc_deinit (context);
 
   if (print_with_color)
     {
@@ -2606,66 +2666,47 @@ file_failure (bool serious, char const *message, char const *file)
    COMMAND_LINE_ARG means this directory was mentioned on the command line.  */
 
 static void
-queue_directory (char const *name, char const *realname, bool command_line_arg)
+queue_directory (char const *name, char const *realname, bool command_line_arg,
+                 const struct stat *st)
 {
   struct pending *new = xmalloc (sizeof *new);
   new->realname = realname ? xstrdup (realname) : NULL;
   new->name = name ? xstrdup (name) : NULL;
   new->command_line_arg = command_line_arg;
   new->next = pending_dirs;
+  if (st)
+    new->st = *st;
+  else
+    if (tc_stat(name, &new->st) != 0)
+      error(ENOENT, ENOENT, "cannot stat directory: %s\n", name);
   pending_dirs = new;
 }
 
-/* Read directory NAME, and list the files in it.
+/* Print directory NAME and its contents should have be put in 'cwd_file'.
    If REALNAME is nonzero, print its name instead of NAME;
    this is used for symbolic links to directories.
    COMMAND_LINE_ARG means this directory was mentioned on the command line.  */
 
-#ifndef NFS4TC
 static void
-print_dir (char const *name, char const *realname, bool command_line_arg)
+print_dir (char const *name, char const *realname, bool command_line_arg,
+           const struct stat *st)
 {
-  DIR *dirp;
-  struct dirent *next;
-  uintmax_t total_blocks = 0;
   static bool first = true;
-
-  errno = 0;
-  dirp = opendir (name);
-  if (!dirp)
-    {
-      file_failure (command_line_arg, _("cannot open directory %s"), name);
-      return;
-    }
 
   if (LOOP_DETECT)
     {
-      struct stat dir_stat;
-      int fd = dirfd (dirp);
-
-      /* If dirfd failed, endure the overhead of using stat.  */
-      if ((0 <= fd
-           ? fstat (fd, &dir_stat)
-           : stat (name, &dir_stat)) < 0)
-        {
-          file_failure (command_line_arg,
-                        _("cannot determine device and inode of %s"), name);
-          closedir (dirp);
-          return;
-        }
-
+      assert(st);
       /* If we've already visited this dev/inode pair, warn that
          we've found a loop, and do not process this directory.  */
-      if (visit_dir (dir_stat.st_dev, dir_stat.st_ino))
+      if (visit_dir (st->st_dev, st->st_ino))
         {
           error (0, 0, _("%s: not listing already-listed directory"),
                  quotef (name));
-          closedir (dirp);
           set_exit_status (true);
           return;
         }
 
-      dev_ino_push (dir_stat.st_dev, dir_stat.st_ino);
+      dev_ino_push (st->st_dev, st->st_ino);
     }
 
   if (recursive || print_dir_name)
@@ -2681,78 +2722,7 @@ print_dir (char const *name, char const *realname, bool command_line_arg)
       DIRED_FPUTS_LITERAL (":\n", stdout);
     }
 
-  /* Read the directory entries, and insert the subfiles into the 'cwd_file'
-     table.  */
-
-  clear_files ();
-
-  while (1)
-    {
-      /* Set errno to zero so we can distinguish between a readdir failure
-         and when readdir simply finds that there are no more entries.  */
-      errno = 0;
-      next = readdir (dirp);
-      if (next)
-        {
-          if (! file_ignored (next->d_name))
-            {
-              enum filetype type = unknown;
-
-#if HAVE_STRUCT_DIRENT_D_TYPE
-              switch (next->d_type)
-                {
-                case DT_BLK:  type = blockdev;		break;
-                case DT_CHR:  type = chardev;		break;
-                case DT_DIR:  type = directory;		break;
-                case DT_FIFO: type = fifo;		break;
-                case DT_LNK:  type = symbolic_link;	break;
-                case DT_REG:  type = normal;		break;
-                case DT_SOCK: type = sock;		break;
-# ifdef DT_WHT
-                case DT_WHT:  type = whiteout;		break;
-# endif
-                }
-#endif
-              total_blocks += gobble_file (next->d_name, type,
-                                           RELIABLE_D_INO (next),
-                                           false, name);
-
-              /* In this narrow case, print out each name right away, so
-                 ls uses constant memory while processing the entries of
-                 this directory.  Useful when there are many (millions)
-                 of entries in a directory.  */
-              if (format == one_per_line && sort_type == sort_none
-                      && !print_block_size && !recursive)
-                {
-                  /* We must call sort_files in spite of
-                     "sort_type == sort_none" for its initialization
-                     of the sorted_file vector.  */
-                  sort_files ();
-                  print_current_files ();
-                  clear_files ();
-                }
-            }
-        }
-      else if (errno != 0)
-        {
-          file_failure (command_line_arg, _("reading directory %s"), name);
-          if (errno != EOVERFLOW)
-            break;
-        }
-      else
-        break;
-
-      /* When processing a very large directory, and since we've inhibited
-         interrupts, this loop would take so long that ls would be annoyingly
-         uninterruptible.  This ensures that it handles signals promptly.  */
-      process_signals ();
-    }
-
-  if (closedir (dirp) != 0)
-    {
-      file_failure (command_line_arg, _("closing directory %s"), name);
-      /* Don't return; print whatever we got.  */
-    }
+  process_signals ();
 
   /* Sort the directory contents.  */
   sort_files ();
@@ -2772,7 +2742,7 @@ print_dir (char const *name, char const *realname, bool command_line_arg)
       p = _("total");
       DIRED_FPUTS (p, stdout, strlen (p));
       DIRED_PUTCHAR (' ');
-      p = human_readable (total_blocks, buf, human_output_opts,
+      p = human_readable (tc_total_blocks, buf, human_output_opts,
                           ST_NBLOCKSIZE, output_block_size);
       DIRED_FPUTS (p, stdout, strlen (p));
       DIRED_PUTCHAR ('\n');
@@ -2780,8 +2750,10 @@ print_dir (char const *name, char const *realname, bool command_line_arg)
 
   if (cwd_n_used)
     print_current_files ();
+
+  clear_files ();
+  tc_total_blocks = 0;
 }
-#endif
 
 /* Add 'pattern' to the list of patterns for which files that match are
    not listed.  */
@@ -2810,10 +2782,10 @@ patterns_match (struct ignore_pattern const *patterns, char const *file)
   return false;
 }
 
-
 /* Return true if FILE should be ignored.  */
 
-static bool file_ignored (char const *name)
+static bool
+file_ignored (char const *name)
 {
   return ((ignore_mode != IGNORE_MINIMAL
            && name[0] == '.'
@@ -2822,7 +2794,6 @@ static bool file_ignored (char const *name)
               && patterns_match (hide_patterns, name))
           || patterns_match (ignore_patterns, name));
 }
-
 
 /* POSIX requires that a file size be printed without a sign, even
    when negative.  Assume the typical case where negative sizes are
@@ -2998,18 +2969,10 @@ has_capability_cache (char const *file, struct fileinfo *f)
    Return the number of blocks that the file occupies.  */
 static uintmax_t
 gobble_file (char const *name, enum filetype type, ino_t inode,
-             bool command_line_arg, char const *dirname)
+             bool command_line_arg, char const *dirname, const struct stat *st)
 {
   uintmax_t blocks = 0;
   struct fileinfo *f;
-#ifdef NFS4TC
-  tc_res result = { .okay = true, .index = -1, .err_no = 0 };
-
-  struct tc_attrs read_attr = {
-	  .file = tc_file_from_path(name),
-	  .masks = TC_ATTRS_MASK_ALL,
-  };
-#endif
 
   /* An inode value prior to gobble_file necessarily came from readdir,
      which is not used for command line arguments.  */
@@ -3069,7 +3032,6 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
       bool do_deref;
       int err;
 
-
       if (name[0] == '/' || dirname[0] == 0)
         absolute_name = (char *) name;
       else
@@ -3081,17 +3043,14 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
       switch (dereference)
         {
         case DEREF_ALWAYS:
-#ifdef NFS4TC
-	  result = tc_getattrsv(&read_attr, 1, 0);
-	  if (result.okay == false)
-            err = result.err_no;
-	  else {
-	    tc_attrs2stat(&read_attr, &f->stat);
-	    err = 0;
-	  }
-#else
-          err = stat (absolute_name, &f->stat);
-#endif
+          if (st)
+            {
+              f->stat = *st;
+              err = 0;
+            }
+          else
+            err = tc_stat (absolute_name, &f->stat);
+
           do_deref = true;
           break;
 
@@ -3100,17 +3059,14 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
           if (command_line_arg)
             {
               bool need_lstat;
-#ifdef NFS4TC
-	      result = tc_getattrsv(&read_attr, 1, 0);
-	      if (result.okay == false)
-                err = result.err_no;
-              else {
-                tc_attrs2stat(&read_attr, &f->stat);
-                err = 0;
-	      }
-#else
-              err = stat (absolute_name, &f->stat);
-#endif
+              if (st)
+                {
+                  f->stat = *st;
+                  err = 0;
+                }
+              else
+                err = tc_stat (absolute_name, &f->stat);
+
               do_deref = true;
 
               if (dereference == DEREF_COMMAND_LINE_ARGUMENTS)
@@ -3129,17 +3085,13 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
             }
 
         default: /* DEREF_NEVER */
-#ifdef NFS4TC
-          result = tc_getattrsv(&read_attr, 1, 0);
-	  if (result.okay == false)
-            err = result.err_no;
-          else {
-            tc_attrs2stat(&read_attr, &f->stat);
-            err = 0;
-	  }
-#else
-          err = lstat (absolute_name, &f->stat);
-#endif
+          if (st)
+            {
+              f->stat = *st;
+              err = 0;
+            }
+          else
+            err = tc_lstat (absolute_name, &f->stat);
           do_deref = false;
           break;
         }
@@ -3223,7 +3175,7 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
              they won't be traced and when no indicator is needed.  */
           if (linkname
               && (file_type <= indicator_style || check_symlink_color)
-              && stat (linkname, &linkstats) == 0)
+              && tc_stat (linkname, &linkstats) == 0)
             {
               f->linkok = true;
 
@@ -3425,7 +3377,7 @@ extract_dirs_from_files (char const *dirname, bool command_line_arg)
       /* Insert a marker entry first.  When we dequeue this marker entry,
          we'll know that DIRNAME has been processed and may be removed
          from the set of active directories.  */
-      queue_directory (NULL, dirname, false);
+      queue_directory (NULL, dirname, false, NULL);
     }
 
   /* Queue the directories last one first, because queueing reverses the
@@ -3439,11 +3391,11 @@ extract_dirs_from_files (char const *dirname, bool command_line_arg)
               || ! basename_is_dot_or_dotdot (f->name)))
         {
           if (!dirname || f->name[0] == '/')
-            queue_directory (f->name, f->linkname, command_line_arg);
+            queue_directory (f->name, f->linkname, command_line_arg, &f->stat);
           else
             {
               char *name = file_name_concat (dirname, f->name, NULL);
-              queue_directory (name, f->linkname, command_line_arg);
+              queue_directory (name, f->linkname, command_line_arg, &f->stat);
               free (name);
             }
           if (f->filetype == arg_directory)
@@ -3690,7 +3642,6 @@ initialize_ordering_vector (void)
   size_t i;
   for (i = 0; i < cwd_n_used; i++)
     sorted_file[i] = &cwd_file[i];
-
 }
 
 /* Sort the files now in the table.  */
@@ -5082,102 +5033,3 @@ Exit status:\n\
     }
   exit (status);
 }
-
-#ifdef NFS4TC
-static void tc_print_dir(char const *name, char const *realname,
-                         bool command_line_arg)
-{
-  struct tc_attrs *contents =
-      (struct tc_attrs *)calloc(4096, sizeof(struct tc_attrs));
-  struct tc_attrs_masks masks = TC_MASK_INIT_ALL;
-  struct tc_attrs *cur_dirp = NULL;
-  int i=0, count = 0;
-  static bool first = true;
-
-  contents->masks = masks;
-
-  clear_files();
-
-  if (LOOP_DETECT)
-    dev_ino_push(0, 0);
-
-  tc_res res = tc_listdir(name, masks, 4096, false, &contents, &count);
-
-  if (res.okay == false)
-    return;
-
-  while (i < count) {
-    cur_dirp = (contents + i);
-    enum filetype type = unknown;
-
-    if (! file_ignored (cur_dirp->file.path))
-    {
-	unsigned int type_x = DT_UNKNOWN;
-
-#if HAVE_STRUCT_DIRENT_D_TYPE
-       if(S_ISDIR(cur_dirp->mode)){
-		type_x = DT_DIR;
-       }
-       else if(S_ISCHR(cur_dirp->mode)) {
-		type = DT_CHR;
-       }
-       else if(S_ISBLK(cur_dirp->mode)) {
-		type_x = DT_BLK;
-       }
-       else if(S_ISFIFO(cur_dirp->mode)) {
-		type_x = DT_FIFO;
-       }
-       else if(S_ISLNK(cur_dirp->mode)) {
-		type_x = DT_LNK;
-       }
-       else if(S_ISREG(cur_dirp->mode)) {
-		type_x = DT_REG;
-       }
-       else if(S_ISSOCK(cur_dirp->mode)) {
-		type_x = DT_SOCK;
-       }
-
-       switch (type_x)
-       {
-          case DT_BLK:  type = blockdev;	break;
-          case DT_CHR:  type = chardev;		break;
-          case DT_DIR:  type = directory;	break;
-          case DT_FIFO: type = fifo;		break;
-          case DT_LNK:  type = symbolic_link;	break;
-          case DT_REG:  type = normal;		break;
-          case DT_SOCK: type = sock;		break;
-# ifdef DT_WHT
-          case DT_WHT:  type = whiteout;	break;
-# endif
-       }
-#endif
-      gobble_file(cur_dirp->file.path, type, NOT_AN_INODE_NUMBER, false, name);
-    }
-    i++;
-  }
-
-
-  if (recursive || print_dir_name)
-    {
-      if (!first)
-        DIRED_PUTCHAR ('\n');
-      first = false;
-      DIRED_INDENT ();
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      dired_pos += quote_name (stdout, realname ? realname : name,
-                               dirname_quoting_options, NULL);
-      PUSH_CURRENT_DIRED_POS (&subdired_obstack);
-      DIRED_FPUTS_LITERAL (":\n", stdout);
-    }
-
-  sort_files ();
-
-  if (recursive)
-    extract_dirs_from_files (name, command_line_arg);
-
-  if (cwd_n_used)
-    print_current_files ();
-
-  free(contents);
-}
-#endif
