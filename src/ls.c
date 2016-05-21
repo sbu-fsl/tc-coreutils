@@ -1272,9 +1272,9 @@ mode2type (mode_t mode)
     ft = fifo;
   else if (S_ISLNK(mode))
     ft = symbolic_link;
-  else if(S_ISREG(mode))
+  else if (S_ISREG(mode))
     ft = normal;
-  else if(S_ISSOCK(mode))
+  else if (S_ISSOCK(mode))
     ft = sock;
   else
     ft = unknown;
@@ -1291,24 +1291,17 @@ listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
 
   tc_attrs2stat (tca, &st);
   dirpath = new_auto_str (dirname);
-  if (cmpslice (dirname, toslice(cur_listing_dir->name)) != 0)
+  if (strncmp (dirname.data, cur_listing_dir->name, dirname.size) != 0)
     {
       print_dir (cur_listing_dir->name, cur_listing_dir->realname,
                  cur_listing_dir->command_line_arg, &cur_listing_dir->st);
-
       cur_listing_dir = cur_listing_dir->next;
-      assert(cur_listing_dir);
-      if (cmpslice(dirname, toslice(cur_listing_dir->name)) == 0)
-        {
-          error(1, EINVAL, "dirname: %.*s; cur_listing_dir->name: %s\n",
-                (int)dirname.size, dirname.data, cur_listing_dir->name);
-        }
     }
 
   if (! file_ignored (new_auto_str (basename)))
     {
       tc_attrs2stat (tca, &st);
-      tc_total_blocks += gobble_file (tca->file.path, mode2type(tca->mode),
+      tc_total_blocks += gobble_file (basename.data, mode2type (tca->mode),
                                       (ino_t)tca->fileid, false, dirpath, &st);
     }
 
@@ -1526,8 +1519,6 @@ main (int argc, char **argv)
   else if (n_files <= 1 && pending_dirs && pending_dirs->next == 0)
     print_dir_name = false;
 
-  cur_listing_dir = pending_dirs;
-
   while (pending_dirs)
     {
       thispend = pending_dirs;
@@ -1558,6 +1549,7 @@ main (int argc, char **argv)
             }
         }
 
+      cur_listing_dir = thispend;
       tcres = tc_listdirv (dirs, rdcnt, TC_ATTRS_MASK_ALL, 0, recursive,
                            listdir_cb, NULL, thispend);
       if (!tc_okay(tcres))
