@@ -1291,7 +1291,7 @@ listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
 
   tc_attrs2stat (tca, &st);
   dirpath = new_auto_str (dirname);
-  if (strncmp (dirname.data, cur_listing_dir->name, dirname.size) != 0)
+  while (strncmp (dirname.data, cur_listing_dir->name, dirname.size) != 0)
     {
       print_dir (cur_listing_dir->name, cur_listing_dir->realname,
                  cur_listing_dir->command_line_arg, &cur_listing_dir->st);
