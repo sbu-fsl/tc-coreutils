@@ -2669,7 +2669,7 @@ queue_directory (char const *name, char const *realname, bool command_line_arg,
   if (st)
     new->st = *st;
   else
-    if (tc_stat(name, &new->st) != 0)
+    if (name != NULL && tc_stat(name, &new->st) != 0)
       error(ENOENT, ENOENT, "cannot stat directory: %s\n", name);
   pending_dirs = new;
 }
