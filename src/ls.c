@@ -1557,22 +1557,26 @@ main (int argc, char **argv)
           error(tcres.err_no, tcres.err_no, "tc_listdirv failed\n");
         }
 
+      /* The last directory in "dirs" won't be printed in the callback function
+         listdir_cb(), so we need to print the last directory after
+         tc_listdirv() but before exiting the loop because subdirectories are
+         not queued until print_dir().  Queueing subdirectories has to be in
+         print_dir() because they need to be sorted before queueing. */
+      if (cwd_n_used)
+        {
+          assert (cur_listing_dir);
+          print_dir (cur_listing_dir->name, cur_listing_dir->realname,
+                     cur_listing_dir->command_line_arg, &cur_listing_dir->st);
+          cur_listing_dir = cur_listing_dir->next;
+        }
+
       for (i = 0; i < rdcnt; ++i)
         {
           nextpend = thispend;
           free_pending_ent (thispend);
         }
-
-      print_dir_name = true;
     }
 
-  if (cwd_n_used)
-    {
-      print_dir (cur_listing_dir->name, cur_listing_dir->realname,
-                 cur_listing_dir->command_line_arg, &cur_listing_dir->st);
-      cur_listing_dir = cur_listing_dir->next;
-      assert (!cur_listing_dir);
-    }
   tc_deinit (context);
 
   if (print_with_color)
@@ -3720,6 +3724,8 @@ print_current_files (void)
         }
       break;
     }
+
+  print_dir_name = true;
 }
 
 /* Replace the first %b with precomputed aligned month names.
