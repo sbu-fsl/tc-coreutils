@@ -1550,8 +1550,8 @@ main (int argc, char **argv)
         }
 
       cur_listing_dir = thispend;
-      tcres = tc_listdirv (dirs, rdcnt, TC_ATTRS_MASK_ALL, 0, recursive,
-                           listdir_cb, NULL, thispend);
+      tcres = tc_listdirv (dirs, rdcnt, TC_ATTRS_MASK_ALL, 0, false,
+                           listdir_cb, NULL, false);
       if (!tc_okay(tcres))
         {
           error(tcres.err_no, tcres.err_no, "tc_listdirv failed\n");
@@ -2984,6 +2984,9 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
   memset (f, '\0', sizeof *f);
   f->stat.st_ino = inode;
   f->filetype = type;
+
+  if (st)
+    f->stat_ok = true;
 
   if (command_line_arg
       || format_needs_stat
