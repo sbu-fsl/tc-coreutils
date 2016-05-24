@@ -1281,6 +1281,15 @@ mode2type (mode_t mode)
   return ft;
 }
 
+static void
+remove_dir_from_hash(void)
+{
+  struct dev_ino di = dev_ino_pop ();
+  struct dev_ino *found = hash_delete (active_dir_set, &di);
+  /* ASSERT_MATCHING_DEV_INO (thispend->realname, di); */
+  dev_ino_free (found);
+}
+
 static bool
 listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
 {
@@ -1289,10 +1298,19 @@ listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
   slice_t basename = tc_path_basename (tca->file.path);
   char *dirpath = NULL;
 
+  fprintf(stderr, "callback %s\n", tca->file.path);
   tc_attrs2stat (tca, &st);
   dirpath = new_auto_str (dirname);
   while (strncmp (dirname.data, cur_listing_dir->name, dirname.size) != 0)
     {
+    fprintf(stderr,
+            "cur_listing_dir did not match %.*s; go from %s to %s "
+            "(realname: %s)\n",
+            (int)dirname.size, dirname.data, cur_listing_dir->name,
+            (cur_listing_dir->next && cur_listing_dir->next->name
+                 ? cur_listing_dir->next->name
+                 : "NULL"),
+            (cur_listing_dir->next ? cur_listing_dir->next->realname : "NULL"));
       print_dir (cur_listing_dir->name, cur_listing_dir->realname,
                  cur_listing_dir->command_line_arg, &cur_listing_dir->st);
       cur_listing_dir = cur_listing_dir->next;
@@ -1322,6 +1340,7 @@ main (int argc, char **argv)
   struct pending *nextpend;
 
   struct pending *thispend;
+  struct pending **prevnext;
   int n_files;
 
   /* The signals that are trapped, and the number of such signals.  */
@@ -1521,32 +1540,29 @@ main (int argc, char **argv)
 
   while (pending_dirs)
     {
-      thispend = pending_dirs;
+      thispend = NULL;
+      prevnext = &thispend;
       rdcnt = 0;
       while (rdcnt < TC_LIMIT && pending_dirs)
         {
-          if (LOOP_DETECT && pending_dirs->name == NULL)
+          assert(pending_dirs->name != NULL);
+          if (LOOP_DETECT)
             {
-              /* thispend->name == NULL means this is a marker entry
-                 indicating we've finished processing the directory.
-                 Use its dev/ino numbers to remove the corresponding
-                 entry from the active_dir_set hash table.  */
-              struct dev_ino di = dev_ino_pop ();
-              struct dev_ino *found = hash_delete (active_dir_set, &di);
-              /* ASSERT_MATCHING_DEV_INO (thispend->realname, di); */
-              dev_ino_free (found);
-              nextpend = pending_dirs->next;
-              if (thispend == pending_dirs)
-                thispend = nextpend;
-              free_pending_ent (pending_dirs);
-              pending_dirs = nextpend;
+              if (visit_dir (pending_dirs->st.st_dev, pending_dirs->st.st_ino))
+                {
+                  error (EINVAL, EINVAL,
+                         _("%s: not listing already-listed directory"),
+                         quotef (pending_dirs->name));
+                }
+              dev_ino_push (pending_dirs->st.st_dev, pending_dirs->st.st_ino);
             }
-          else
-            {
-              dirs[rdcnt] = pending_dirs->name;
-              pending_dirs = pending_dirs->next;
-              ++rdcnt;
-            }
+
+          fprintf(stderr, "listing dir: %s\n", pending_dirs->name);
+          dirs[rdcnt] = pending_dirs->name;
+          *prevnext = pending_dirs;
+          prevnext = &pending_dirs->next;
+          pending_dirs = pending_dirs->next;
+          ++rdcnt;
         }
 
       cur_listing_dir = thispend;
@@ -1572,8 +1588,10 @@ main (int argc, char **argv)
 
       for (i = 0; i < rdcnt; ++i)
         {
-          nextpend = thispend;
+          assert(thispend != NULL);
+          nextpend = thispend->next;
           free_pending_ent (thispend);
+          thispend = nextpend;
         }
     }
 
@@ -2689,22 +2707,6 @@ print_dir (char const *name, char const *realname, bool command_line_arg,
 {
   static bool first = true;
 
-  if (LOOP_DETECT)
-    {
-      assert(st);
-      /* If we've already visited this dev/inode pair, warn that
-         we've found a loop, and do not process this directory.  */
-      if (visit_dir (st->st_dev, st->st_ino))
-        {
-          error (0, 0, _("%s: not listing already-listed directory"),
-                 quotef (name));
-          set_exit_status (true);
-          return;
-        }
-
-      dev_ino_push (st->st_dev, st->st_ino);
-    }
-
   if (recursive || print_dir_name)
     {
       if (!first)
@@ -2749,6 +2751,8 @@ print_dir (char const *name, char const *realname, bool command_line_arg,
 
   clear_files ();
   tc_total_blocks = 0;
+
+  remove_dir_from_hash();
 }
 
 /* Add 'pattern' to the list of patterns for which files that match are
@@ -3370,14 +3374,6 @@ extract_dirs_from_files (char const *dirname, bool command_line_arg)
   size_t i;
   size_t j;
   bool ignore_dot_and_dot_dot = (dirname != NULL);
-
-  if (dirname && LOOP_DETECT)
-    {
-      /* Insert a marker entry first.  When we dequeue this marker entry,
-         we'll know that DIRNAME has been processed and may be removed
-         from the set of active directories.  */
-      queue_directory (NULL, dirname, false, NULL);
-    }
 
   /* Queue the directories last one first, because queueing reverses the
      order.  */
