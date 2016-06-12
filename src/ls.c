@@ -2752,7 +2752,8 @@ print_dir (char const *name, char const *realname, bool command_line_arg,
   clear_files ();
   tc_total_blocks = 0;
 
-  remove_dir_from_hash();
+  if (LOOP_DETECT)
+    remove_dir_from_hash();
 }
 
 /* Add 'pattern' to the list of patterns for which files that match are
