@@ -355,12 +355,19 @@ struct pending
     bool command_line_arg;
     struct stat st;
     struct pending *next;
+    struct pending *prev;
+    struct fileinfo *children;
+    size_t capacity;
+    size_t count;
+    bool listed;
+    uintmax_t nr_blocks;
   };
 
 static struct pending *pending_dirs;
 
 uintmax_t tc_total_blocks = 0;
 
+/* Current directory being listed in the list-dir callback. */
 struct pending *cur_listing_dir = NULL;
 
 /* Current time in seconds and nanoseconds since 1970, updated as
@@ -1290,6 +1297,27 @@ remove_dir_from_hash(void)
   dev_ino_free (found);
 }
 
+/* Save the listed contents of the current directory and wait for its turn to
+   be printed */
+static void
+save_dir_contents (void)
+{
+  assert(cur_listing_dir->capacity == 0);
+
+  cur_listing_dir->capacity = cwd_n_alloc;
+  cur_listing_dir->count = cwd_n_used;
+  cur_listing_dir->listed = true;
+  cur_listing_dir->nr_blocks = tc_total_blocks;
+  if (cwd_n_used > 0)
+    cur_listing_dir->children =
+        xmemdup(cwd_file, cwd_n_used * sizeof(struct fileinfo));
+  else
+    cur_listing_dir->children = NULL;
+
+  cwd_n_used = 0;
+  tc_total_blocks = 0;
+}
+
 static bool
 listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
 {
@@ -1298,22 +1326,26 @@ listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
   slice_t basename = tc_path_basename (tca->file.path);
   char *dirpath = NULL;
 
-  fprintf(stderr, "callback %s\n", tca->file.path);
+  // fprintf(stderr, "callback %s\n", tca->file.path);
   tc_attrs2stat (tca, &st);
   dirpath = new_auto_str (dirname);
   while (strncmp (dirname.data, cur_listing_dir->name, dirname.size) != 0)
     {
-    fprintf(stderr,
-            "cur_listing_dir did not match %.*s; go from %s to %s "
-            "(realname: %s)\n",
-            (int)dirname.size, dirname.data, cur_listing_dir->name,
-            (cur_listing_dir->next && cur_listing_dir->next->name
-                 ? cur_listing_dir->next->name
-                 : "NULL"),
-            (cur_listing_dir->next ? cur_listing_dir->next->realname : "NULL"));
-      print_dir (cur_listing_dir->name, cur_listing_dir->realname,
-                 cur_listing_dir->command_line_arg, &cur_listing_dir->st);
-      cur_listing_dir = cur_listing_dir->next;
+      /*
+      fprintf(stderr,
+              "cur_listing_dir did not match %.*s; go from %s to %s "
+              "(realname: %s)\n",
+              (int)dirname.size, dirname.data, cur_listing_dir->name,
+              (cur_listing_dir->next && cur_listing_dir->next->name
+                   ? cur_listing_dir->next->name
+                   : "NULL"),
+              (cur_listing_dir->next
+                   ? cur_listing_dir->next->realname : "NULL"));
+      */
+      save_dir_contents ();
+
+      while (cur_listing_dir && cur_listing_dir->listed)
+        cur_listing_dir = cur_listing_dir->next;
     }
 
   if (! file_ignored (new_auto_str (basename)))
@@ -1337,10 +1369,8 @@ main (int argc, char **argv)
   int rdcnt = 0;
   tc_res tcres = { .err_no = 0 };
   const char *dirs[TC_LIMIT];
-  struct pending *nextpend;
 
-  struct pending *thispend;
-  struct pending **prevnext;
+  struct pending *pp;
   int n_files;
 
   /* The signals that are trapped, and the number of such signals.  */
@@ -1540,32 +1570,28 @@ main (int argc, char **argv)
 
   while (pending_dirs)
     {
-      thispend = NULL;
-      prevnext = &thispend;
       rdcnt = 0;
-      while (rdcnt < TC_LIMIT && pending_dirs)
+      for (pp = pending_dirs; rdcnt < TC_LIMIT && pp; pp = pp->next)
         {
-          assert(pending_dirs->name != NULL);
+          assert(pp->name != NULL);
+          if (pp->listed) continue;
+
           if (LOOP_DETECT)
             {
-              if (visit_dir (pending_dirs->st.st_dev, pending_dirs->st.st_ino))
+              if (visit_dir (pp->st.st_dev, pp->st.st_ino))
                 {
                   error (EINVAL, EINVAL,
                          _("%s: not listing already-listed directory"),
-                         quotef (pending_dirs->name));
+                         quotef (pp->name));
                 }
-              dev_ino_push (pending_dirs->st.st_dev, pending_dirs->st.st_ino);
+              dev_ino_push (pp->st.st_dev, pp->st.st_ino);
             }
 
-          fprintf(stderr, "listing dir: %s\n", pending_dirs->name);
-          dirs[rdcnt] = pending_dirs->name;
-          *prevnext = pending_dirs;
-          prevnext = &pending_dirs->next;
-          pending_dirs = pending_dirs->next;
-          ++rdcnt;
+          fprintf(stderr, "add dir for listing: %s\n", pp->name);
+          dirs[rdcnt++] = pp->name;
         }
 
-      cur_listing_dir = thispend;
+      cur_listing_dir = pending_dirs;
       tcres = tc_listdirv (dirs, rdcnt, TC_ATTRS_MASK_ALL, 0, false,
                            listdir_cb, NULL, false);
       if (!tc_okay(tcres))
@@ -1573,25 +1599,37 @@ main (int argc, char **argv)
           error(tcres.err_no, tcres.err_no, "tc_listdirv failed\n");
         }
 
-      /* The last directory in "dirs" won't be printed in the callback function
-         listdir_cb(), so we need to print the last directory after
+      /* The last non-empty directory in "dirs" and trailing empty directories
+         won't be collected in the callback function listdir_cb(), so we need to
+         collect those tail directories after
          tc_listdirv() but before exiting the loop because subdirectories are
          not queued until print_dir().  Queueing subdirectories has to be in
          print_dir() because they need to be sorted before queueing. */
-      if (cwd_n_used)
+      while (cur_listing_dir != pp)
         {
-          assert (cur_listing_dir);
-          print_dir (cur_listing_dir->name, cur_listing_dir->realname,
-                     cur_listing_dir->command_line_arg, &cur_listing_dir->st);
-          cur_listing_dir = cur_listing_dir->next;
+          save_dir_contents ();
+          while (cur_listing_dir && cur_listing_dir->listed)
+            cur_listing_dir = cur_listing_dir->next;
         }
 
-      for (i = 0; i < rdcnt; ++i)
+      assert (pending_dirs->listed);
+      while (pending_dirs && pending_dirs->listed)
         {
-          assert(thispend != NULL);
-          nextpend = thispend->next;
-          free_pending_ent (thispend);
-          thispend = nextpend;
+          /* Set pp->children as cwd_file. */
+          pp = pending_dirs;
+          assert (cwd_n_used == 0);
+          if (cwd_file) free(cwd_file);
+          cwd_file = pp->children;
+          cwd_n_alloc = pp->capacity;
+          cwd_n_used = pp->count;
+          tc_total_blocks = pp->nr_blocks;
+          print_dir (pp->name, pp->realname, pp->command_line_arg, &pp->st);
+          if (pp->prev) pp->prev->next = pp->next;
+          if (pp->next) pp->next->prev = pp->prev;
+          /* Update pending_dirs if it is not updated yet by print_dir(). */
+          if (pp == pending_dirs)
+            pending_dirs = pp->next;
+          free_pending_ent (pp);
         }
     }
 
@@ -2688,6 +2726,14 @@ queue_directory (char const *name, char const *realname, bool command_line_arg,
   new->name = name ? xstrdup (name) : NULL;
   new->command_line_arg = command_line_arg;
   new->next = pending_dirs;
+  new->prev = NULL;
+  if (pending_dirs)
+    pending_dirs->prev = new;
+  new->children = NULL;
+  new->capacity = 0;
+  new->count = 0;
+  new->listed = false;
+  new->nr_blocks = 0;
   if (st)
     new->st = *st;
   else
@@ -3294,6 +3340,7 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
     }
 
   f->name = xstrdup (name);
+  fprintf(stderr, "gobbled: %s -> %s\n", name, f->name);
   cwd_n_used++;
 
   return blocks;
