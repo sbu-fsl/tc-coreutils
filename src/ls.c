@@ -83,6 +83,9 @@
 # define SA_RESTART 0
 #endif
 
+#define DBG(fmt, args...)
+/*#define DBG(fmt, args...) fprintf(stderr, fmt, ##args)*/
+
 #include "system.h"
 #include <fnmatch.h>
 
@@ -1297,6 +1300,37 @@ remove_dir_from_hash(void)
   dev_ino_free (found);
 }
 
+/* Switch cwd to the arguments and save the information of the old directory.
+   If the "files" are NULL, then restore the old cwd. */
+static void
+switch_cwd_files(struct fileinfo *files, size_t n_alloc, size_t n_used,
+                 size_t blocks)
+{
+  static struct fileinfo *saved_files;
+  static size_t saved_n_alloc;
+  static size_t saved_n_used;
+  static size_t saved_blocks;
+
+  if (files)
+    {
+      saved_files = cwd_file;
+      saved_n_alloc = cwd_n_alloc;
+      saved_n_used = cwd_n_used;
+      saved_blocks = tc_total_blocks;
+      cwd_file = files;
+      cwd_n_alloc = n_alloc;
+      cwd_n_used = n_used;
+      tc_total_blocks = blocks;
+    }
+  else
+    {
+      cwd_file = saved_files;
+      cwd_n_alloc = saved_n_alloc;
+      cwd_n_used = saved_n_used;
+      tc_total_blocks = saved_blocks;
+    }
+}
+
 /* Save the listed contents of the current directory and wait for its turn to
    be printed */
 static void
@@ -1314,6 +1348,11 @@ save_dir_contents (void)
   else
     cur_listing_dir->children = NULL;
 
+  DBG("saving cwd_file of %s: %zu children (first child: %s) at %p to %p\n",
+      cur_listing_dir->name, cwd_n_used,
+      cwd_n_used > 0 ? cur_listing_dir->children->name : "NULL",
+      cwd_file, cur_listing_dir->children);
+
   cwd_n_used = 0;
   tc_total_blocks = 0;
 }
@@ -1326,22 +1365,17 @@ listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
   slice_t basename = tc_path_basename (tca->file.path);
   char *dirpath = NULL;
 
-  // fprintf(stderr, "callback %s\n", tca->file.path);
+  DBG("callback %s\n", tca->file.path);
   tc_attrs2stat (tca, &st);
   dirpath = new_auto_str (dirname);
   while (strncmp (dirname.data, cur_listing_dir->name, dirname.size) != 0)
     {
-      /*
-      fprintf(stderr,
-              "cur_listing_dir did not match %.*s; go from %s to %s "
-              "(realname: %s)\n",
-              (int)dirname.size, dirname.data, cur_listing_dir->name,
-              (cur_listing_dir->next && cur_listing_dir->next->name
-                   ? cur_listing_dir->next->name
-                   : "NULL"),
-              (cur_listing_dir->next
-                   ? cur_listing_dir->next->realname : "NULL"));
-      */
+      DBG("cur_listing_dir did not match %.*s; go from %s to %s "
+          "(realname: %s)\n",
+          (int)dirname.size, dirname.data, cur_listing_dir->name,
+          (cur_listing_dir->next && cur_listing_dir->next->name ?
+           cur_listing_dir->next->name : "NULL"),
+          (cur_listing_dir->next ? cur_listing_dir->next->realname : "NULL"));
       save_dir_contents ();
 
       while (cur_listing_dir && cur_listing_dir->listed)
@@ -1529,6 +1563,7 @@ main (int argc, char **argv)
 
   cwd_n_alloc = 100;
   cwd_file = xnmalloc (cwd_n_alloc, sizeof *cwd_file);
+  DBG("cwd_file initialized at %p\n", cwd_file);
   cwd_n_used = 0;
 
   clear_files ();
@@ -1587,7 +1622,7 @@ main (int argc, char **argv)
               dev_ino_push (pp->st.st_dev, pp->st.st_ino);
             }
 
-          fprintf(stderr, "add dir for listing: %s\n", pp->name);
+          DBG("add dir for listing: %s\n", pp->name);
           dirs[rdcnt++] = pp->name;
         }
 
@@ -1618,11 +1653,14 @@ main (int argc, char **argv)
           /* Set pp->children as cwd_file. */
           pp = pending_dirs;
           assert (cwd_n_used == 0);
-          if (cwd_file) free(cwd_file);
-          cwd_file = pp->children;
-          cwd_n_alloc = pp->capacity;
-          cwd_n_used = pp->count;
-          tc_total_blocks = pp->nr_blocks;
+          DBG("freeing cwd_file at %p, reset to %p with %zu children\n",
+              cwd_file, pp->children, pp->count);
+
+          switch_cwd_files (pp->children, pp->capacity, pp->count,
+                            pp->nr_blocks);
+
+          DBG("printing %s: %zu children at %p\n", pp->name, pp->count,
+              pp->children);
           print_dir (pp->name, pp->realname, pp->command_line_arg, &pp->st);
           if (pp->prev) pp->prev->next = pp->next;
           if (pp->next) pp->next->prev = pp->prev;
@@ -1630,6 +1668,10 @@ main (int argc, char **argv)
           if (pp == pending_dirs)
             pending_dirs = pp->next;
           free_pending_ent (pp);
+
+          DBG("restoring cwd_file to %p with %zu children\n", cwd_file,
+              cwd_n_used);
+          switch_cwd_files (NULL, 0, 0, 0);
         }
     }
 
@@ -3027,7 +3069,9 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
 
   if (cwd_n_used == cwd_n_alloc)
     {
+      DBG("realloc cwd_file from %p ", cwd_file);
       cwd_file = xnrealloc (cwd_file, cwd_n_alloc, 2 * sizeof *cwd_file);
+      DBG("to %p\n", cwd_file);
       cwd_n_alloc *= 2;
     }
 
@@ -3340,7 +3384,6 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
     }
 
   f->name = xstrdup (name);
-  fprintf(stderr, "gobbled: %s -> %s\n", name, f->name);
   cwd_n_used++;
 
   return blocks;
