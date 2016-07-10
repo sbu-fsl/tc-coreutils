@@ -372,6 +372,7 @@ uintmax_t tc_total_blocks = 0;
 
 /* Current directory being listed in the list-dir callback. */
 struct pending *cur_listing_dir = NULL;
+const char **cur_listing_dir_path;
 
 /* Current time in seconds and nanoseconds since 1970, updated as
    needed when deciding whether a file is recent.  */
@@ -1368,20 +1369,29 @@ listdir_cb (const struct tc_attrs *tca, const char *dir, void *arg)
   DBG("callback %s\n", tca->file.path);
   tc_attrs2stat (tca, &st);
   dirpath = new_auto_str (dirname);
-  while (strncmp (dirname.data, cur_listing_dir->name, dirname.size) != 0)
+
+  while (strcmp (*cur_listing_dir_path, dir) != 0)
     {
-      DBG("cur_listing_dir did not match %.*s; go from %s to %s "
+      DBG("cur_listing_dir did not match %s; go from %s to %s "
           "(realname: %s)\n",
-          (int)dirname.size, dirname.data, cur_listing_dir->name,
+          tca->file.path, cur_listing_dir->name,
           (cur_listing_dir->next && cur_listing_dir->next->name ?
            cur_listing_dir->next->name : "NULL"),
           (cur_listing_dir->next ? cur_listing_dir->next->realname : "NULL"));
-      save_dir_contents ();
 
-      while (cur_listing_dir && cur_listing_dir->listed)
-        cur_listing_dir = cur_listing_dir->next;
+      if (!cur_listing_dir->listed)
+        {
+          save_dir_contents ();
+          ++cur_listing_dir_path;
+        }
+
+      cur_listing_dir = cur_listing_dir->next;
     }
 
+  while (cur_listing_dir->listed)
+    cur_listing_dir = cur_listing_dir->next;
+
+  assert (!strncmp(dirname.data, cur_listing_dir->name, dirname.size));
   if (! file_ignored (new_auto_str (basename)))
     {
       tc_attrs2stat (tca, &st);
@@ -1402,7 +1412,7 @@ main (int argc, char **argv)
   void *context = NULL;
   int rdcnt = 0;
   tc_res tcres = { .err_no = 0 };
-  const char *dirs[TC_LIMIT];
+  const char *dirs[TC_LIMIT + 1];
 
   struct pending *pp;
   int n_files;
@@ -1625,8 +1635,12 @@ main (int argc, char **argv)
           DBG("add dir for listing: %s\n", pp->name);
           dirs[rdcnt++] = pp->name;
         }
+      dirs[rdcnt] = NULL;
 
       cur_listing_dir = pending_dirs;
+      cur_listing_dir_path = dirs;
+      DBG("cur_listing_dir is %s; pp is %s\n",
+          cur_listing_dir->name, pp ? pp->name : "NULL");
       tcres = tc_listdirv (dirs, rdcnt, TC_ATTRS_MASK_ALL, 0, false,
                            listdir_cb, NULL, false);
       if (!tc_okay(tcres))
@@ -1640,11 +1654,17 @@ main (int argc, char **argv)
          tc_listdirv() but before exiting the loop because subdirectories are
          not queued until print_dir().  Queueing subdirectories has to be in
          print_dir() because they need to be sorted before queueing. */
-      while (cur_listing_dir != pp)
+      while (*cur_listing_dir_path)
         {
-          save_dir_contents ();
-          while (cur_listing_dir && cur_listing_dir->listed)
-            cur_listing_dir = cur_listing_dir->next;
+          if (!cur_listing_dir->listed)
+            {
+              save_dir_contents ();
+              ++cur_listing_dir_path;
+            }
+          DBG("cur_listing_dir updated from %s to %s\n",
+              cur_listing_dir->name,
+              cur_listing_dir->next ?  cur_listing_dir->next->name : "NULL");
+          cur_listing_dir = cur_listing_dir->next;
         }
 
       assert (pending_dirs->listed);
