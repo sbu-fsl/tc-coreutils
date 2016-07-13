@@ -731,6 +731,15 @@ do_copy (int n_files, char **file, const char *target_directory,
                                               NULL));
             }
 
+          if (x->symbolic_link)
+            {
+              if (arg[0] != '/' && ! STREQ(dst_name, "."))
+                {
+                  error (1, 0,
+                   _("%s: can make relative symbolic links only in current directory"),
+                  quotef (dst_name));
+                }
+            }
           if (!parent_exists)
             {
               /* make_dir_parents_private failed, so don't even
@@ -772,7 +781,9 @@ do_copy (int n_files, char **file, const char *target_directory,
                   int count;
                   struct tc_attrs *contents;
                   struct tc_attrs_masks masks = TC_ATTRS_MASK_NONE;
-                  struct tc_extent_pair *dir_copy_pairs;
+                  struct tc_extent_pair *dir_copy_pairs = NULL;
+                  const char **oldpaths = NULL;
+                  const char **newpaths = NULL;
                   struct tc_attrs *copied_attrs;
                   char *path;
                   int file_count = 0;
@@ -785,7 +796,15 @@ do_copy (int n_files, char **file, const char *target_directory,
                     {
                       error (res.err_no, res.err_no, "tc_listdir failed");
                     }
-                  dir_copy_pairs = alloca (sizeof (struct tc_extent_pair) * count);
+                  if (x->symbolic_link)
+                    {
+                      oldpaths = alloca (sizeof (char *) * count);
+                      newpaths = alloca (sizeof (char *) * count);
+                    }
+                  else
+                    {
+                      dir_copy_pairs = alloca (sizeof (struct tc_extent_pair) * count);
+                    }
                   copied_attrs = alloca (sizeof (struct tc_attrs) * count);
 
                   for (j = 0; j < count; j++)
@@ -803,11 +822,19 @@ do_copy (int n_files, char **file, const char *target_directory,
 
                       if (!S_ISDIR(contents[j].mode))
                         {
-                          dir_copy_pairs[file_count].src_path = contents[j].file.path;
-                          dir_copy_pairs[file_count].dst_path = path;
-                          dir_copy_pairs[file_count].src_offset = 0;
-                          dir_copy_pairs[file_count].dst_offset = 0;
-                          dir_copy_pairs[file_count].length = 0;
+                          if (x->symbolic_link)
+                            {
+                              oldpaths[file_count] = contents[j].file.path;
+                              newpaths[file_count] = path;
+                            }
+                          else
+                            {
+                              dir_copy_pairs[file_count].src_path = contents[j].file.path;
+                              dir_copy_pairs[file_count].dst_path = path;
+                              dir_copy_pairs[file_count].src_offset = 0;
+                              dir_copy_pairs[file_count].dst_offset = 0;
+                              dir_copy_pairs[file_count].length = 0;
+                            }
 
                           file_count++;
                         }
@@ -829,11 +856,22 @@ do_copy (int n_files, char **file, const char *target_directory,
 
                     }
 
-                  res = tc_copyv(dir_copy_pairs, file_count, false);
-                  if (!tc_okay (res))
+
+                  if (x->symbolic_link)
                     {
-                      printf("%d\n", res.index);
-                      error (res.err_no, res.err_no, "tc_copyv on dir failed");
+                      res = tc_symlinkv(oldpaths, newpaths, file_count, false);
+                      if (!tc_okay (res))
+                        {
+                          error (res.err_no, res.err_no, "tc_symlinkv on dir failed");
+                        }
+                    }
+                  else
+                    {
+                      res = tc_copyv(dir_copy_pairs, file_count, false);
+                      if (!tc_okay (res))
+                        {
+                          error (res.err_no, res.err_no, "tc_copyv on dir failed");
+                        }
                     }
                   res = tc_setattrsv(copied_attrs, count, false);
                   if (!tc_okay (res))
@@ -954,16 +992,28 @@ do_copy (int n_files, char **file, const char *target_directory,
         }
 
 
-      pairs[0].src_path = source;
-      pairs[0].dst_path = new_dest;
-      pairs[0].src_offset = 0;
-      pairs[0].dst_offset = 0;
-      pairs[0].length = 0;
-      res = tc_copyv(pairs, 1, false);
-
-      if (!tc_okay (res)) {
-          error (res.err_no, res.err_no, "tc_copyv failed\n");
+      if (x->symbolic_link)
+      {
+        res = tc_symlinkv(&source, &new_dest, 1, false);
+        if (!tc_okay (res))
+        {
+          error (res.err_no, res.err_no, "tc_symlinkv failed\n");
+        }
       }
+      else
+        {
+          pairs[0].src_path = source;
+          pairs[0].dst_path = new_dest;
+          pairs[0].src_offset = 0;
+          pairs[0].dst_offset = 0;
+          pairs[0].length = 0;
+          res = tc_copyv(pairs, 1, false);
+
+          if (!tc_okay (res))
+            {
+              error (res.err_no, res.err_no, "tc_copyv failed\n");
+            }
+        }
 
       attrs[0].file = tc_file_from_path(new_dest);
       res = tc_setattrsv(attrs, 1, false);
