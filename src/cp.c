@@ -1,6 +1,5 @@
 /* cp.c  -- file copying (main routines)
    Copyright (C) 1989-2016 Free Software Foundation, Inc.
-
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation, either version 3 of the License, or
@@ -636,26 +635,27 @@ do_copy (int n_files, char **file, const char *target_directory,
                quoteaf (file[n_files - 1]));
     }
 
-  for (i = 0; i < n_files - 1; i++)
-    {
-      attrs[i].file = tc_file_from_path(file[i]);
-      attrs[i].masks = TC_ATTRS_MASK_NONE;
-      attrs[i].masks.has_mode = true;
-    }
-  res = tc_lgetattrsv(attrs, n_files - 1, false);
-  if (!tc_okay (res))
-  {
-    error (res.err_no, res.err_no, "initial tc_lgetattrsv failed");
-  }
   if (n_files == 2 && !target_directory)
     {
+      attrs[0].file = tc_file_from_path(file[0]);
+      attrs[0].masks = TC_ATTRS_MASK_NONE;
+      attrs[0].masks.has_mode = true;
+      attrs[0].masks.has_uid = true;
+      attrs[0].masks.has_gid = true;
+      res = tc_lgetattrsv(attrs, 1, false);
+      if (!tc_okay (res))
+        {
+          error (res.err_no, res.err_no, "initial tc_lgetattrsv failed");
+        }
       if (S_ISDIR (attrs[0].mode))
         {
           struct tc_attrs dir;
           target_directory = file[--n_files];
           dir.file = tc_file_from_path(target_directory);
-          dir.masks.has_mode = true;
+          dir.masks = attrs[0].masks;
           dir.mode = attrs[0].mode;
+          dir.uid = attrs[0].uid;
+          dir.gid = attrs[0].gid;
           res = tc_mkdirv(&dir, 1, false);
           if (!tc_okay (res))
             {
