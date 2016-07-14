@@ -640,8 +640,6 @@ do_copy (int n_files, char **file, const char *target_directory,
       attrs[0].file = tc_file_from_path(file[0]);
       attrs[0].masks = TC_ATTRS_MASK_NONE;
       attrs[0].masks.has_mode = true;
-      attrs[0].masks.has_uid = true;
-      attrs[0].masks.has_gid = true;
       res = tc_lgetattrsv(attrs, 1, false);
       if (!tc_okay (res))
         {
@@ -654,8 +652,6 @@ do_copy (int n_files, char **file, const char *target_directory,
           dir.file = tc_file_from_path(target_directory);
           dir.masks = attrs[0].masks;
           dir.mode = attrs[0].mode;
-          dir.uid = attrs[0].uid;
-          dir.gid = attrs[0].gid;
           res = tc_mkdirv(&dir, 1, false);
           if (!tc_okay (res))
             {
@@ -663,7 +659,6 @@ do_copy (int n_files, char **file, const char *target_directory,
             }
         }
     }
-  printf("%s %d", target_directory, no_target_directory);
   if (target_directory)
     {
       /* cp file1...filen edir
@@ -753,8 +748,6 @@ do_copy (int n_files, char **file, const char *target_directory,
               attrs[i].file = tc_file_from_path(arg);
               attrs[i].masks =  TC_ATTRS_MASK_NONE;
               attrs[i].masks.has_mode = true;
-              attrs[i].masks.has_uid = true;
-              attrs[i].masks.has_gid = true;
               // ok &= copy (arg, dst_name, new_dst, x, &copy_into_self, NULL);
 
 
@@ -789,8 +782,6 @@ do_copy (int n_files, char **file, const char *target_directory,
                   int file_count = 0;
 
                   masks.has_mode = true;
-                  masks.has_gid = true;
-                  masks.has_uid = true;
                   res = tc_listdir(attrs[i].file.path, masks, 0, true, &contents, &count);
                   if (!tc_okay (res))
                     {
@@ -816,9 +807,7 @@ do_copy (int n_files, char **file, const char *target_directory,
                         {
                           for (int k = 0; *dst_suffix++ == file[i][k]; k++);
                         }
-                      /* printf("contents[j].file.path: %s\n", contents[j].file.path); */
                       tc_path_join(target_directory, dst_suffix, path, PATH_MAX);
-                      /* printf("target dir: %s, dst_suffix: %s, path: %s\n", target_directory, dst_suffix, path); */
 
                       if (!S_ISDIR(contents[j].mode))
                         {
@@ -840,7 +829,6 @@ do_copy (int n_files, char **file, const char *target_directory,
                         }
                       else
                         {
-                          printf("%s\n", path);
                           res = tc_ensure_dir (path, 0755, NULL);
                           if (!tc_okay (res))
                           {
@@ -851,8 +839,6 @@ do_copy (int n_files, char **file, const char *target_directory,
                       copied_attrs[j].file = tc_file_from_path (path);
                       copied_attrs[j].masks = masks;
                       copied_attrs[j].mode = contents[j].mode;
-                      copied_attrs[j].uid = contents[j].uid;
-                      copied_attrs[j].gid = contents[j].gid;
 
                     }
 
@@ -914,7 +900,6 @@ do_copy (int n_files, char **file, const char *target_directory,
         }
 
       ok &= tc_okay(tc_copyv(pairs, n_files, false));
-      printf("n_files: %d\n", n_files);
 
       for (i = 0; i < n_files; i++)
         {
@@ -978,8 +963,6 @@ do_copy (int n_files, char **file, const char *target_directory,
       attrs[0].file = tc_file_from_path(source);
       attrs[0].masks = TC_ATTRS_MASK_NONE;
       attrs[0].masks.has_mode = true;
-      attrs[0].masks.has_uid = true;
-      attrs[0].masks.has_gid = true;
       res = tc_getattrsv(attrs, 1, false);
       if (!tc_okay (res)) {
           error(res.err_no, res.err_no, "tc_getattrsv failed\n");
