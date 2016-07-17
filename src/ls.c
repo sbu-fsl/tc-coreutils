@@ -3423,7 +3423,18 @@ is_directory (const struct fileinfo *f)
 static void
 get_link_name (char const *filename, struct fileinfo *f, bool command_line_arg)
 {
-  f->linkname = areadlink_with_size (filename, f->stat.st_size);
+  char *buf = malloc(PATH_MAX);
+  ssize_t r = tc_readlink(filename, buf, PATH_MAX);
+  if (r < 0)
+    {
+      f->linkname = NULL;
+      free(buf);
+    }
+  else
+    {
+      f->linkname = buf;
+    }
+
   if (f->linkname == NULL)
     file_failure (command_line_arg, _("cannot read symbolic link %s"),
                   filename);
