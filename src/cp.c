@@ -1,6 +1,5 @@
 /* cp.c  -- file copying (main routines)
    Copyright (C) 1989-2016 Free Software Foundation, Inc.
-
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation, either version 3 of the License, or
@@ -18,6 +17,7 @@
 
 #include <config.h>
 #include <stdio.h>
+#include <assert.h>
 #include <sys/types.h>
 #include <getopt.h>
 #include <selinux/selinux.h>
@@ -34,6 +34,11 @@
 #include "stat-time.h"
 #include "utimens.h"
 #include "acl.h"
+
+#include "tc_api.h"
+#include "tc_helper.h"
+#include "path_utils.h"
+#define DEFAULT_LOG_FILE "/tmp/nfs4tc-coreutils-cp.log"
 
 #if ! HAVE_LCHOWN
 # define lchown(name, uid, gid) chown (name, uid, gid)
@@ -569,7 +574,8 @@ make_dir_parents_private (char const *const_dir, size_t src_offset,
 static bool
 target_directory_operand (char const *file, struct stat *st, bool *new_dst)
 {
-  int err = (stat (file, st) == 0 ? 0 : errno);
+  // int err = stat (file, st) == 0 ? 0 : errno;
+  int err = tc_stat (file, st);
   bool is_a_dir = !err && S_ISDIR (st->st_mode);
   if (err)
     {
@@ -590,6 +596,10 @@ do_copy (int n_files, char **file, const char *target_directory,
   struct stat sb;
   bool new_dst = false;
   bool ok = true;
+  int i;
+  tc_res res;
+  struct tc_attrs *attrs = alloca (sizeof (struct tc_attrs) * n_files);
+  struct tc_extent_pair *pairs = alloca (sizeof (struct tc_extent_pair) * n_files);
 
   if (n_files <= !target_directory)
     {
@@ -625,12 +635,35 @@ do_copy (int n_files, char **file, const char *target_directory,
                quoteaf (file[n_files - 1]));
     }
 
+  if (n_files == 2 && !target_directory)
+    {
+      attrs[0].file = tc_file_from_path(file[0]);
+      attrs[0].masks = TC_ATTRS_MASK_NONE;
+      attrs[0].masks.has_mode = true;
+      res = tc_lgetattrsv(attrs, 1, false);
+      if (!tc_okay (res))
+        {
+          error (res.err_no, res.err_no, "initial tc_lgetattrsv failed");
+        }
+      if (S_ISDIR (attrs[0].mode))
+        {
+          struct tc_attrs dir;
+          target_directory = file[--n_files];
+          dir.file = tc_file_from_path(target_directory);
+          dir.masks = attrs[0].masks;
+          dir.mode = attrs[0].mode;
+          res = tc_mkdirv(&dir, 1, false);
+          if (!tc_okay (res))
+            {
+              error (res.err_no, res.err_no, "tc_mkdirv failed");
+            }
+        }
+    }
   if (target_directory)
     {
       /* cp file1...filen edir
          Copy the files 'file1' through 'filen'
          to the existing directory 'edir'. */
-      int i;
 
       /* Initialize these hash tables only if we'll need them.
          The problems they're used to detect can arise only if
@@ -693,6 +726,15 @@ do_copy (int n_files, char **file, const char *target_directory,
                                               NULL));
             }
 
+          if (x->symbolic_link)
+            {
+              if (arg[0] != '/' && ! STREQ(dst_name, "."))
+                {
+                  error (1, 0,
+                   _("%s: can make relative symbolic links only in current directory"),
+                  quotef (dst_name));
+                }
+            }
           if (!parent_exists)
             {
               /* make_dir_parents_private failed, so don't even
@@ -701,25 +743,177 @@ do_copy (int n_files, char **file, const char *target_directory,
             }
           else
             {
-              bool copy_into_self;
-              ok &= copy (arg, dst_name, new_dst, x, &copy_into_self, NULL);
+              // bool copy_into_self;
+              printf("1 arg: %s dst_name: %s new_dst: %d\n", arg, dst_name, new_dst);
+              attrs[i].file = tc_file_from_path(arg);
+              attrs[i].masks =  TC_ATTRS_MASK_NONE;
+              attrs[i].masks.has_mode = true;
+              // ok &= copy (arg, dst_name, new_dst, x, &copy_into_self, NULL);
+
 
               if (parents_option)
                 ok &= re_protect (dst_name, arg_in_concat - dst_name,
                                   attr_list, x);
             }
 
-          if (parents_option)
-            {
-              while (attr_list)
-                {
-                  struct dir_attr *p = attr_list;
-                  attr_list = attr_list->next;
-                  free (p);
-                }
-            }
 
-          free (dst_name);
+        }
+
+      res = tc_getattrsv(attrs, n_files, false);
+      if (!tc_okay (res))
+        {
+          error (res.err_no, res.err_no, "tc_getattrsv failed");
+        }
+      for (i = 0; i < n_files; i++)
+        {
+          if (S_ISDIR (attrs[i].mode))
+            {
+              if (x->recursive)
+                {
+                  int j;
+                  int count;
+                  struct tc_attrs *contents;
+                  struct tc_attrs_masks masks = TC_ATTRS_MASK_NONE;
+                  struct tc_extent_pair *dir_copy_pairs = NULL;
+                  const char **oldpaths = NULL;
+                  const char **newpaths = NULL;
+                  struct tc_attrs *copied_attrs;
+                  char *path;
+                  int file_count = 0;
+
+                  masks.has_mode = true;
+                  res = tc_listdir(attrs[i].file.path, masks, 0, true, &contents, &count);
+                  if (!tc_okay (res))
+                    {
+                      error (res.err_no, res.err_no, "tc_listdir failed");
+                    }
+                  if (x->symbolic_link)
+                    {
+                      oldpaths = alloca (sizeof (char *) * count);
+                      newpaths = alloca (sizeof (char *) * count);
+                    }
+                  else
+                    {
+                      dir_copy_pairs = alloca (sizeof (struct tc_extent_pair) * count);
+                    }
+                  copied_attrs = alloca (sizeof (struct tc_attrs) * count);
+
+                  for (j = 0; j < count; j++)
+                    {
+                      path = malloc(sizeof(char) * PATH_MAX);
+                      const char *dst_suffix = contents[j].file.path;
+
+                      if (new_dst)
+                        {
+                          for (int k = 0; *dst_suffix++ == file[i][k]; k++);
+                        }
+                      tc_path_join(target_directory, dst_suffix, path, PATH_MAX);
+
+                      if (!S_ISDIR(contents[j].mode))
+                        {
+                          if (x->symbolic_link)
+                            {
+                              oldpaths[file_count] = contents[j].file.path;
+                              newpaths[file_count] = path;
+                            }
+                          else
+                            {
+                              dir_copy_pairs[file_count].src_path = contents[j].file.path;
+                              dir_copy_pairs[file_count].dst_path = path;
+                              dir_copy_pairs[file_count].src_offset = 0;
+                              dir_copy_pairs[file_count].dst_offset = 0;
+                              dir_copy_pairs[file_count].length = 0;
+                            }
+
+                          file_count++;
+                        }
+                      else
+                        {
+                          res = tc_ensure_dir (path, 0755, NULL);
+                          if (!tc_okay (res))
+                          {
+                            error (res.err_no, res.err_no, "tc_ensure_dir failed");
+                          }
+                        }
+
+                      copied_attrs[j].file = tc_file_from_path (path);
+                      copied_attrs[j].masks = masks;
+                      copied_attrs[j].mode = contents[j].mode;
+
+                    }
+
+
+                  if (x->symbolic_link)
+                    {
+                      res = tc_symlinkv(oldpaths, newpaths, file_count, false);
+                      if (!tc_okay (res))
+                        {
+                          error (res.err_no, res.err_no, "tc_symlinkv on dir failed");
+                        }
+                    }
+                  else
+                    {
+                      res = tc_copyv(dir_copy_pairs, file_count, false);
+                      if (!tc_okay (res))
+                        {
+                          error (res.err_no, res.err_no, "tc_copyv on dir failed");
+                        }
+                    }
+                  res = tc_setattrsv(copied_attrs, count, false);
+                  if (!tc_okay (res))
+                    {
+                      error (res.err_no, res.err_no, "tc_setattrsv on dir failed");
+                    }
+                  for (j = 0; j < count; j++)
+                    {
+                      free((char *) copied_attrs[j].file.path);
+                    }
+                }
+              else
+                {
+                  error (0, 0, _("omitting directory %s"), quoteaf (attrs[i].file.path));
+                }
+              attrs[i] = attrs[n_files - 1];
+              n_files--;
+            }
+          else
+            {
+              char *arg = file[i];
+              char *arg_base;
+              char *dst_name;
+              if (remove_trailing_slashes)
+                strip_trailing_slashes (arg);
+              /* Append the last component of 'arg' to 'target_directory'.  */
+
+              ASSIGN_BASENAME_STRDUPA (arg_base, arg);
+              /* For 'cp -R source/.. dest', don't copy into 'dest/..'. */
+              dst_name = (STREQ (arg_base, "..")
+                          ? xstrdup (target_directory)
+                          : file_name_concat (target_directory, arg_base,
+                                              NULL));
+              pairs[i].src_path = arg;
+              pairs[i].dst_path = dst_name;
+              pairs[i].src_offset = 0;
+              pairs[i].dst_offset = 0;
+              pairs[i].length = 0;
+            }
+        }
+
+      ok &= tc_okay(tc_copyv(pairs, n_files, false));
+
+      for (i = 0; i < n_files; i++)
+        {
+          free((char *) pairs[i].dst_path);
+          attrs[i].file = tc_file_from_path(pairs[i].dst_path);
+        }
+      res = tc_setattrsv(attrs, n_files, false);
+      if (!tc_okay (res))
+        {
+          error (res.err_no, res.err_no, "tc_setattrsv failed");
+        }
+      for (i = 0; i < n_files; i++)
+        {
+          free ((char *) pairs[i].dst_path);
         }
     }
   else /* !target_directory */
@@ -727,7 +921,7 @@ do_copy (int n_files, char **file, const char *target_directory,
       char const *new_dest;
       char const *source = file[0];
       char const *dest = file[1];
-      bool unused;
+      // bool unused;
 
       if (parents_option)
         {
@@ -764,7 +958,54 @@ do_copy (int n_files, char **file, const char *target_directory,
           new_dest = dest;
         }
 
-      ok = copy (source, new_dest, 0, x, &unused, NULL);
+      printf("2 arg: %s dst_name: %s \n", source, new_dest);
+      printf("n_files: %d\n", n_files);
+      attrs[0].file = tc_file_from_path(source);
+      attrs[0].masks = TC_ATTRS_MASK_NONE;
+      attrs[0].masks.has_mode = true;
+      res = tc_getattrsv(attrs, 1, false);
+      if (!tc_okay (res)) {
+          error(res.err_no, res.err_no, "tc_getattrsv failed\n");
+      }
+
+      if (S_ISDIR (attrs[0].mode) && !x->recursive)
+        {
+          error (0, 0, _("omitting directory %s"), quoteaf (source));
+          return false;
+        }
+
+
+      if (x->symbolic_link)
+      {
+        res = tc_symlinkv(&source, &new_dest, 1, false);
+        if (!tc_okay (res))
+        {
+          error (res.err_no, res.err_no, "tc_symlinkv failed\n");
+        }
+      }
+      else
+        {
+          pairs[0].src_path = source;
+          pairs[0].dst_path = new_dest;
+          pairs[0].src_offset = 0;
+          pairs[0].dst_offset = 0;
+          pairs[0].length = 0;
+          res = tc_copyv(pairs, 1, false);
+
+          if (!tc_okay (res))
+            {
+              error (res.err_no, res.err_no, "tc_copyv failed\n");
+            }
+        }
+
+      attrs[0].file = tc_file_from_path(new_dest);
+      res = tc_setattrsv(attrs, 1, false);
+      if (!tc_okay (res)) {
+          error(res.err_no, res.err_no, "tc_setattrsv failed\n");
+      }
+
+
+      // ok = copy (source, new_dest, 0, x, &unused, NULL);
     }
 
   return ok;
@@ -918,6 +1159,8 @@ int
 main (int argc, char **argv)
 {
   int c;
+  void *context = NULL;
+  char tc_config_path[PATH_MAX];
   bool ok;
   bool make_backups = false;
   char *backup_suffix_string;
@@ -933,6 +1176,16 @@ main (int argc, char **argv)
   setlocale (LC_ALL, "");
   bindtextdomain (PACKAGE, LOCALEDIR);
   textdomain (PACKAGE);
+
+  get_tc_config_file (tc_config_path, PATH_MAX);
+  fprintf (stderr, "using config file: %s\n", tc_config_path);
+
+  context = tc_init (NULL, DEFAULT_LOG_FILE, 77);
+  if (!context)
+    {
+      printf("initializing tc failed\n");
+      return 1;
+    }
 
   atexit (close_stdin);
 
@@ -1048,6 +1301,7 @@ main (int argc, char **argv)
           break;
 
         case PARENTS_OPTION:
+          assert (false && "parents option not supported");
           parents_option = true;
           break;
 
@@ -1075,8 +1329,9 @@ main (int argc, char **argv)
           else
             {
               struct stat st;
-              if (stat (optarg, &st) != 0)
-                error (EXIT_FAILURE, errno, _("failed to access %s"),
+              int err_no = tc_stat (optarg, &st);
+              if (err_no != 0)
+                error (EXIT_FAILURE, err_no, _("failed to access %s"),
                        quoteaf (optarg));
               if (! S_ISDIR (st.st_mode))
                 error (EXIT_FAILURE, 0, _("target %s is not a directory"),
@@ -1217,6 +1472,8 @@ main (int argc, char **argv)
 #ifdef lint
   forget_all ();
 #endif
+
+  tc_deinit(context);
 
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
