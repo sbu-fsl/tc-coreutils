@@ -32,6 +32,9 @@
 #include "yesno.h"
 #include "priv-set.h"
 
+#include "tc_api.h"
+#include "tc_helper.h"
+
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "rm"
 
@@ -348,7 +351,24 @@ main (int argc, char **argv)
         return EXIT_SUCCESS;
     }
 
-  enum RM_status status = rm (file, &x);
+  char tc_config_path[PATH_MAX];
+  get_tc_config_file (tc_config_path, PATH_MAX);
+  fprintf (stderr, "using config file: %s\n", tc_config_path);
+
+#define DEFAULT_LOG_FILE "/tmp/nfs4tc-coreutils-ls.log"
+  void *context = tc_init (tc_config_path, DEFAULT_LOG_FILE, 77);
+  if (context == NULL)
+    {
+      printf("error in initializing\n");
+      return 1;
+    }
+
+
+  /* TODO: deal with options */
+  tc_res tcres = tc_rm((const char **)file, n_files, false);
+  enum RM_status status = tc_okay(tcres) ? RM_OK : RM_ERROR;
+
+  tc_deinit (context);
   assert (VALID_STATUS (status));
   return status == RM_ERROR ? EXIT_FAILURE : EXIT_SUCCESS;
 }
