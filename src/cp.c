@@ -858,11 +858,11 @@ do_copy (int n_files, char **file, const char *target_directory,
                         {
                           error (res.err_no, res.err_no, "tc_copyv on dir failed");
                         }
-                    }
-                  res = tc_setattrsv(copied_attrs, count, false);
-                  if (!tc_okay (res))
-                    {
-                      error (res.err_no, res.err_no, "tc_setattrsv on dir failed");
+                      res = tc_setattrsv(copied_attrs, count, false);
+                      if (!tc_okay (res))
+                        {
+                          error (res.err_no, res.err_no, "tc_setattrsv on dir failed");
+                        }
                     }
                   for (j = 0; j < count; j++)
                     {
@@ -899,21 +899,23 @@ do_copy (int n_files, char **file, const char *target_directory,
             }
         }
 
-      ok &= tc_okay(tc_copyv(pairs, n_files, false));
+      if (n_files != 0)
+        {
+          ok &= tc_okay(tc_copyv(pairs, n_files, false));
 
-      for (i = 0; i < n_files; i++)
-        {
-          free((char *) pairs[i].dst_path);
-          attrs[i].file = tc_file_from_path(pairs[i].dst_path);
-        }
-      res = tc_setattrsv(attrs, n_files, false);
-      if (!tc_okay (res))
-        {
-          error (res.err_no, res.err_no, "tc_setattrsv failed");
-        }
-      for (i = 0; i < n_files; i++)
-        {
-          free ((char *) pairs[i].dst_path);
+          for (i = 0; i < n_files; i++)
+            {
+              attrs[i].file = tc_file_from_path(pairs[i].dst_path);
+            }
+          res = tc_setattrsv(attrs, n_files, false);
+          if (!tc_okay (res))
+            {
+              error (res.err_no, res.err_no, "tc_setattrsv failed");
+            }
+          for (i = 0; i < n_files; i++)
+            {
+              free ((char *) pairs[i].dst_path);
+            }
         }
     }
   else /* !target_directory */
@@ -1180,7 +1182,7 @@ main (int argc, char **argv)
   get_tc_config_file (tc_config_path, PATH_MAX);
   fprintf (stderr, "using config file: %s\n", tc_config_path);
 
-  context = tc_init (NULL, DEFAULT_LOG_FILE, 77);
+  context = tc_init (tc_config_path, DEFAULT_LOG_FILE, 77);
   if (!context)
     {
       printf("initializing tc failed\n");
