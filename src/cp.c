@@ -778,8 +778,10 @@ do_copy (int n_files, char **file, const char *target_directory,
                   const char **oldpaths = NULL;
                   const char **newpaths = NULL;
                   struct tc_attrs *copied_attrs;
+                  struct tc_attrs *dirs;
                   char *path;
                   int file_count = 0;
+                  int dir_count = 0;
 
                   masks.has_mode = true;
                   res = tc_listdir(attrs[i].file.path, masks, 0, true, &contents, &count);
@@ -797,6 +799,7 @@ do_copy (int n_files, char **file, const char *target_directory,
                       dir_copy_pairs = alloca (sizeof (struct tc_extent_pair) * count);
                     }
                   copied_attrs = alloca (sizeof (struct tc_attrs) * count);
+                  dirs = alloca (sizeof (struct tc_attrs) * count);
 
                   for (j = 0; j < count; j++)
                     {
@@ -829,11 +832,11 @@ do_copy (int n_files, char **file, const char *target_directory,
                         }
                       else
                         {
-                          res = tc_ensure_dir (path, 0755, NULL);
-                          if (!tc_okay (res))
-                          {
-                            error (res.err_no, res.err_no, "tc_ensure_dir failed");
-                          }
+                          dirs[dir_count].file = tc_file_from_path(path);
+                          dirs[dir_count].masks = TC_ATTRS_MASK_NONE;
+                          dirs[dir_count].masks.has_mode = true;
+                          dirs[dir_count].mode = 0755;
+                          dir_count++;
                         }
 
                       copied_attrs[j].file = tc_file_from_path (path);
@@ -842,6 +845,11 @@ do_copy (int n_files, char **file, const char *target_directory,
 
                     }
 
+                  res = tc_mkdirv(dirs, dir_count, false);
+                  if (!tc_okay(res))
+                    {
+                      error (res.err_no, res.err_no, "tc_mkdirv failed");
+                    }
 
                   if (x->symbolic_link)
                     {
