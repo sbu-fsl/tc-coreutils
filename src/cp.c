@@ -861,16 +861,19 @@ do_copy (int n_files, char **file, const char *target_directory,
                     }
                   else
                     {
+                      int b;
                       res = tc_copyv(dir_copy_pairs, file_count, false);
                       if (!tc_okay (res))
                         {
                           error (res.err_no, res.err_no, "tc_copyv on dir failed");
                         }
-                      res = tc_setattrsv(copied_attrs, count, false);
-                      if (!tc_okay (res))
-                        {
-                          error (res.err_no, res.err_no, "tc_setattrsv on dir failed");
-                        }
+                      for (b = 0; b < count; b += 64) {
+                        res = tc_lsetattrsv(&copied_attrs[b], MIN(count - b, 64), false);
+                        if (!tc_okay (res))
+                          {
+                            error (res.err_no, res.err_no, "tc_lsetattrsv on dir failed");
+                          }
+                      }
                     }
                   for (j = 0; j < count; j++)
                     {
