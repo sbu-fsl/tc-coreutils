@@ -647,16 +647,7 @@ do_copy (int n_files, char **file, const char *target_directory,
         }
       if (S_ISDIR (attrs[0].mode))
         {
-          struct tc_attrs dir;
           target_directory = file[--n_files];
-          dir.file = tc_file_from_path(target_directory);
-          dir.masks = attrs[0].masks;
-          dir.mode = attrs[0].mode;
-          res = tc_mkdirv(&dir, 1, false);
-          if (!tc_okay (res))
-            {
-              error (res.err_no, res.err_no, "tc_mkdirv failed");
-            }
         }
     }
   if (target_directory)
@@ -770,114 +761,10 @@ do_copy (int n_files, char **file, const char *target_directory,
             {
               if (x->recursive)
                 {
-                  int j;
-                  int count;
-                  struct tc_attrs *contents;
-                  struct tc_attrs_masks masks = TC_ATTRS_MASK_NONE;
-                  struct tc_extent_pair *dir_copy_pairs = NULL;
-                  const char **oldpaths = NULL;
-                  const char **newpaths = NULL;
-                  struct tc_attrs *copied_attrs;
-                  struct tc_attrs *dirs;
-                  char *path;
-                  int file_count = 0;
-                  int dir_count = 0;
-
-                  masks.has_mode = true;
-                  res = tc_listdir(attrs[i].file.path, masks, 0, true, &contents, &count);
-                  if (!tc_okay (res))
-                    {
-                      error (res.err_no, res.err_no, "tc_listdir failed");
-                    }
-                  if (x->symbolic_link)
-                    {
-                      oldpaths = alloca (sizeof (char *) * count);
-                      newpaths = alloca (sizeof (char *) * count);
-                    }
-                  else
-                    {
-                      dir_copy_pairs = alloca (sizeof (struct tc_extent_pair) * count);
-                    }
-                  copied_attrs = alloca (sizeof (struct tc_attrs) * count);
-                  dirs = alloca (sizeof (struct tc_attrs) * count);
-
-                  for (j = 0; j < count; j++)
-                    {
-                      path = malloc(sizeof(char) * PATH_MAX);
-                      const char *dst_suffix = contents[j].file.path;
-
-                      if (new_dst)
-                        {
-                          for (int k = 0; *dst_suffix++ == file[i][k]; k++);
-                        }
-                      tc_path_join(target_directory, dst_suffix, path, PATH_MAX);
-
-                      if (!S_ISDIR(contents[j].mode))
-                        {
-                          if (x->symbolic_link)
-                            {
-                              oldpaths[file_count] = contents[j].file.path;
-                              newpaths[file_count] = path;
-                            }
-                          else
-                            {
-                              dir_copy_pairs[file_count].src_path = contents[j].file.path;
-                              dir_copy_pairs[file_count].dst_path = path;
-                              dir_copy_pairs[file_count].src_offset = 0;
-                              dir_copy_pairs[file_count].dst_offset = 0;
-                              dir_copy_pairs[file_count].length = 0;
-                            }
-
-                          file_count++;
-                        }
-                      else
-                        {
-                          dirs[dir_count].file = tc_file_from_path(path);
-                          dirs[dir_count].masks = TC_ATTRS_MASK_NONE;
-                          dirs[dir_count].masks.has_mode = true;
-                          dirs[dir_count].mode = 0755;
-                          dir_count++;
-                        }
-
-                      copied_attrs[j].file = tc_file_from_path (path);
-                      copied_attrs[j].masks = masks;
-                      copied_attrs[j].mode = contents[j].mode;
-
-                    }
-
-                  res = tc_mkdirv(dirs, dir_count, false);
+                  res = tc_cp_recursive(file[i], target_directory);
                   if (!tc_okay(res))
                     {
-                      error (res.err_no, res.err_no, "tc_mkdirv failed");
-                    }
-
-                  if (x->symbolic_link)
-                    {
-                      res = tc_symlinkv(oldpaths, newpaths, file_count, false);
-                      if (!tc_okay (res))
-                        {
-                          error (res.err_no, res.err_no, "tc_symlinkv on dir failed");
-                        }
-                    }
-                  else
-                    {
-                      int b;
-                      res = tc_copyv(dir_copy_pairs, file_count, false);
-                      if (!tc_okay (res))
-                        {
-                          error (res.err_no, res.err_no, "tc_copyv on dir failed");
-                        }
-                      for (b = 0; b < count; b += 64) {
-                        res = tc_lsetattrsv(&copied_attrs[b], MIN(count - b, 64), false);
-                        if (!tc_okay (res))
-                          {
-                            error (res.err_no, res.err_no, "tc_lsetattrsv on dir failed");
-                          }
-                      }
-                    }
-                  for (j = 0; j < count; j++)
-                    {
-                      free((char *) copied_attrs[j].file.path);
+                      error (res.err_no, res.err_no, "tc_cp_recursive failed");
                     }
                 }
               else
