@@ -253,6 +253,9 @@ src_mv_LDADD += $(copy_ldadd)
 
 src_mv_LDADD += $(remove_ldadd)
 src_rm_LDADD += $(remove_ldadd)
+src_rm_LDADD += -lpthread
+src_rm_LDADD += $(LIB_TC)
+src_rm_LDADD += $(ADDITIONAL_LIBS)
 
 # for eaccess, euidaccess
 copy_ldadd += $(LIB_EACCESS)

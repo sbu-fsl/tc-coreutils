@@ -368,6 +368,7 @@ struct pending
 
 static struct pending *pending_dirs;
 
+bool USE_SELINUX = false;
 uintmax_t tc_total_blocks = 0;
 
 /* Current directory being listed in the list-dir callback. */
@@ -1632,7 +1633,6 @@ main (int argc, char **argv)
               dev_ino_push (pp->st.st_dev, pp->st.st_ino);
             }
 
-          DBG("add dir for listing: %s\n", pp->name);
           dirs[rdcnt++] = pp->name;
         }
       dirs[rdcnt] = NULL;
@@ -3233,7 +3233,7 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
           && print_with_color && is_colored (C_CAP))
         f->has_capability = has_capability_cache (absolute_name, f);
 
-      if (format == long_format || print_scontext)
+      if (USE_SELINUX && (format == long_format || print_scontext))
         {
           bool have_scontext = false;
           bool have_acl = false;
@@ -3423,7 +3423,18 @@ is_directory (const struct fileinfo *f)
 static void
 get_link_name (char const *filename, struct fileinfo *f, bool command_line_arg)
 {
-  f->linkname = areadlink_with_size (filename, f->stat.st_size);
+  char *buf = malloc(PATH_MAX);
+  ssize_t r = tc_readlink(filename, buf, PATH_MAX);
+  if (r < 0)
+    {
+      f->linkname = NULL;
+      free(buf);
+    }
+  else
+    {
+      f->linkname = buf;
+    }
+
   if (f->linkname == NULL)
     file_failure (command_line_arg, _("cannot read symbolic link %s"),
                   filename);
