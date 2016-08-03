@@ -761,7 +761,7 @@ do_copy (int n_files, char **file, const char *target_directory,
             {
               if (x->recursive)
                 {
-                  res = tc_cp_recursive(file[i], target_directory);
+                  res = tc_cp_recursive(file[i], target_directory, x->symbolic_link);
                   if (!tc_okay(res))
                     {
                       error (res.err_no, res.err_no, "tc_cp_recursive failed");
