@@ -1408,7 +1408,7 @@ main (int argc, char **argv)
 {
   int i;
 
-#define TC_LIMIT 16
+#define TC_LIMIT 64
   char tc_config_path[PATH_MAX];
   void *context = NULL;
   int rdcnt = 0;
