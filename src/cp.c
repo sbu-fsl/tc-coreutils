@@ -735,7 +735,6 @@ do_copy (int n_files, char **file, const char *target_directory,
           else
             {
               // bool copy_into_self;
-              printf("1 arg: %s dst_name: %s new_dst: %d\n", arg, dst_name, new_dst);
               attrs[i].file = tc_file_from_path(arg);
               attrs[i].masks =  TC_ATTRS_MASK_NONE;
               attrs[i].masks.has_mode = true;
@@ -761,7 +760,8 @@ do_copy (int n_files, char **file, const char *target_directory,
             {
               if (x->recursive)
                 {
-                  res = tc_cp_recursive(file[i], target_directory, x->symbolic_link);
+                  res = tc_cp_recursive(file[i], target_directory, x->symbolic_link,
+                      x->server_side_copying);
                   if (!tc_okay(res))
                     {
                       error (res.err_no, res.err_no, "tc_cp_recursive failed");
@@ -944,6 +944,7 @@ cp_option_init (struct cp_options *x)
   x->symbolic_link = false;
   x->set_mode = false;
   x->mode = 0;
+  x->server_side_copying = true;
 
   /* Not used.  */
   x->stdin_tty = false;
@@ -1096,7 +1097,7 @@ main (int argc, char **argv)
      we'll actually use backup_suffix_string.  */
   backup_suffix_string = getenv ("SIMPLE_BACKUP_SUFFIX");
 
-  while ((c = getopt_long (argc, argv, "abdfHilLnprst:uvxPRS:TZ",
+  while ((c = getopt_long (argc, argv, "abdfHilLnprst:uvxPRS:TZz",
                            long_opts, NULL))
          != -1)
     {
@@ -1220,6 +1221,10 @@ main (int argc, char **argv)
 
         case 's':
           x.symbolic_link = true;
+          break;
+
+        case 'z':
+          x.server_side_copying = false;
           break;
 
         case 't':

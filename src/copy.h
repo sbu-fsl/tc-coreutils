@@ -231,6 +231,9 @@ struct cp_options
      Create destination directories as usual. */
   bool symbolic_link;
 
+  /* If ture, use server-side copying instead of read/write. */
+  bool server_side_copying;
+
   /* If true, do not copy a nondirectory that has an existing destination
      with the same or newer modification time. */
   bool update;
