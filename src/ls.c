@@ -2804,6 +2804,55 @@ queue_directory (char const *name, char const *realname, bool command_line_arg,
   pending_dirs = new;
 }
 
+static uintmax_t
+unsigned_file_size (off_t size)
+{
+  return size + (size < 0) * ((uintmax_t) OFF_T_MAX - OFF_T_MIN + 1);
+}
+
+static void
+calculate_file_size_widths (void)
+{
+  size_t i;
+
+  file_size_width = 0;
+  major_device_number_width = 0;
+  minor_device_number_width = 0;
+
+  for (i = 0; i < cwd_n_used; i++)
+    {
+      char b[INT_BUFSIZE_BOUND (uintmax_t)];
+      int b_len = strlen (umaxtostr (cwd_file[i].stat.st_nlink, b));
+      if (nlink_width < b_len)
+        nlink_width = b_len;
+
+      if (S_ISCHR (cwd_file[i].stat.st_mode) || S_ISBLK (cwd_file[i].stat.st_mode))
+        {
+          char buf[INT_BUFSIZE_BOUND (uintmax_t)];
+          int len = strlen (umaxtostr (major (cwd_file[i].stat.st_rdev), buf));
+          if (major_device_number_width < len)
+            major_device_number_width = len;
+          len = strlen (umaxtostr (minor (cwd_file[i].stat.st_rdev), buf));
+          if (minor_device_number_width < len)
+            minor_device_number_width = len;
+          len = major_device_number_width + 2 + minor_device_number_width;
+          if (file_size_width < len)
+            file_size_width = len;
+        }
+      else
+        {
+          char buf[LONGEST_HUMAN_READABLE + 1];
+          uintmax_t size = unsigned_file_size (cwd_file[i].stat.st_size);
+          int len = mbswidth (human_readable (size, buf,
+                                              file_human_output_opts,
+                                              1, file_output_block_size),
+                              0);
+          if (file_size_width < len)
+            file_size_width = len;
+        }
+    }
+}
+
 /* Print directory NAME and its contents should have be put in 'cwd_file'.
    If REALNAME is nonzero, print its name instead of NAME;
    this is used for symbolic links to directories.
@@ -2852,6 +2901,8 @@ print_dir (char const *name, char const *realname, bool command_line_arg,
                           ST_NBLOCKSIZE, output_block_size);
       DIRED_FPUTS (p, stdout, strlen (p));
       DIRED_PUTCHAR ('\n');
+
+      calculate_file_size_widths ();
     }
 
   if (cwd_n_used)
@@ -2907,12 +2958,6 @@ file_ignored (char const *name)
 /* POSIX requires that a file size be printed without a sign, even
    when negative.  Assume the typical case where negative sizes are
    actually positive values that have wrapped around.  */
-
-static uintmax_t
-unsigned_file_size (off_t size)
-{
-  return size + (size < 0) * ((uintmax_t) OFF_T_MAX - OFF_T_MIN + 1);
-}
 
 #ifdef HAVE_CAP
 /* Return true if NAME has a capability (see linux/capability.h) */
@@ -3359,39 +3404,6 @@ gobble_file (char const *name, enum filetype type, ino_t inode,
           int len = strlen (f->scontext);
           if (scontext_width < len)
             scontext_width = len;
-        }
-
-      if (format == long_format)
-        {
-          char b[INT_BUFSIZE_BOUND (uintmax_t)];
-          int b_len = strlen (umaxtostr (f->stat.st_nlink, b));
-          if (nlink_width < b_len)
-            nlink_width = b_len;
-
-          if (S_ISCHR (f->stat.st_mode) || S_ISBLK (f->stat.st_mode))
-            {
-              char buf[INT_BUFSIZE_BOUND (uintmax_t)];
-              int len = strlen (umaxtostr (major (f->stat.st_rdev), buf));
-              if (major_device_number_width < len)
-                major_device_number_width = len;
-              len = strlen (umaxtostr (minor (f->stat.st_rdev), buf));
-              if (minor_device_number_width < len)
-                minor_device_number_width = len;
-              len = major_device_number_width + 2 + minor_device_number_width;
-              if (file_size_width < len)
-                file_size_width = len;
-            }
-          else
-            {
-              char buf[LONGEST_HUMAN_READABLE + 1];
-              uintmax_t size = unsigned_file_size (f->stat.st_size);
-              int len = mbswidth (human_readable (size, buf,
-                                                  file_human_output_opts,
-                                                  1, file_output_block_size),
-                                  0);
-              if (file_size_width < len)
-                file_size_width = len;
-            }
         }
     }
 
