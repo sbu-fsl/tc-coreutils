@@ -793,7 +793,7 @@ do_copy (int n_files, char **file, const char *target_directory,
               pairs[i].dst_path = dst_name;
               pairs[i].src_offset = 0;
               pairs[i].dst_offset = 0;
-              pairs[i].length = 0;
+              pairs[i].length = UINT64_MAX;
             }
         }
 
@@ -889,7 +889,7 @@ do_copy (int n_files, char **file, const char *target_directory,
           pairs[0].dst_path = new_dest;
           pairs[0].src_offset = 0;
           pairs[0].dst_offset = 0;
-          pairs[0].length = 0;
+          pairs[0].length = UINT64_MAX;
           res = tc_copyv(pairs, 1, false);
 
           if (!tc_okay (res))
