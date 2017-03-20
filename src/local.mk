@@ -107,6 +107,7 @@ LIB_TC = ../../tc_client/$(build_type)/tc/libtc_impl.a \
          ../../tc_client/$(build_type)/support/libtc_helper.a \
          ../../tc_client/$(build_type)/cidr/libcidr.a \
          ../../tc_client/$(build_type)/FSAL/FSAL_PSEUDO/libfsalpseudo.a \
+         ../../tc_client/$(build_type)/nfs4/libfsaltcnfs.a \
          ../../tc_client/$(build_type)/NodeList/libNodeList.a \
          ../../tc_client/$(build_type)/config_parsing/libconfig_parsing.a \
          ../../tc_client/$(build_type)/libntirpc/src/libntirpc.a \
